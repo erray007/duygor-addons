@@ -1,0 +1,38 @@
+{
+  "checked_asset": null,
+  "current": {
+    "asset_id": 735295080,
+    "asset_updated_at": "2026-11-11T11:35:19Z",
+    "author": "Eray",
+    "changelog": "İlk mağaza sürümü.\n\nFirst store release.",
+    "descriptions": {
+      "en": "Captures a gesture before the screen reader and says which app you are in and the time",
+      "tr": "Bir hareketi ekran okuyucudan önce yakalar, hangi uygulamada olduğunuzu ve saati söyler"
+    },
+    "languages": [
+      "en",
+      "tr"
+    ],
+    "min_version": 537,
+    "names": {
+      "en": "Gesture Example",
+      "tr": "Hareket Örneği"
+    },
+    "published": "2026-11-11T11:35:20Z",
+    "sha256": "df9264dc9e81e02e122a3836d157d605b0e03be80121c74df358dc767d95c2ce",
+    "size": 2066,
+    "source_language": "en",
+    "url": "https://github.com/erray007/duygor-addon-hareketornegi/releases/download/v1.1/hareketornegi.dgp",
+    "version": "1.1"
+  },
+  "hidden_reason": null,
+  "id": "hareketornegi",
+  "owner_id": 161474134,
+  "owner_login": "erray007",
+  "registered_at": "2026-11-11T11:39:50Z",
+  "rejected_versions": [],
+  "removed": false,
+  "repo": "erray007/duygor-addon-hareketornegi",
+  "reported_asset_change": null,
+  "reported_owner_mismatch": null
+}
