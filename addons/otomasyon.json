@@ -1,0 +1,38 @@
+{
+  "checked_asset": null,
+  "current": {
+    "asset_id": 735294641,
+    "asset_updated_at": "2026-11-11T11:35:09Z",
+    "author": "Eray",
+    "changelog": "İlk mağaza sürümü.\n\nFirst store release.",
+    "descriptions": {
+      "en": "Checks Play Store updates (force stops and retries if the page does not open) and answers incoming calls",
+      "tr": "Play Store güncellemelerini denetler (sayfa açılmazsa Play Store'u kapatıp yeniden dener) ve gelen çağrıları yanıtlar"
+    },
+    "languages": [
+      "en",
+      "tr"
+    ],
+    "min_version": 537,
+    "names": {
+      "en": "Automation",
+      "tr": "Otomasyon"
+    },
+    "published": "2026-11-11T11:35:09Z",
+    "sha256": "f91e0f5fa0904db63dd34f9c30a8dc0025dce4709f11a3b0e2c689a1dffcf315",
+    "size": 4126,
+    "source_language": "en",
+    "url": "https://github.com/erray007/duygor-addon-otomasyon/releases/download/v1.2/otomasyon.dgp",
+    "version": "1.2"
+  },
+  "hidden_reason": null,
+  "id": "otomasyon",
+  "owner_id": 161474134,
+  "owner_login": "erray007",
+  "registered_at": "2026-11-11T11:39:03Z",
+  "rejected_versions": [],
+  "removed": false,
+  "repo": "erray007/duygor-addon-otomasyon",
+  "reported_asset_change": null,
+  "reported_owner_mismatch": null
+}
