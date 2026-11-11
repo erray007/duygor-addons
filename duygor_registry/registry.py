@@ -142,18 +142,23 @@ def _event_outcome(record, event, changed):
         return _published(record["id"], event.version, changed)
     if event.kind == "rejected":
         return Outcome(False, record["id"], event.version, label + " reddedildi: " + event.reason_tr, label + " was rejected: " + event.reason_en, record["owner_login"], changed)
-    return Outcome(False, record["id"], event.version, label + ": " + event.reason_tr, label + ": " + event.reason_en, record["owner_login"], changed)
+    # The registered login may now belong to whoever took the name over, so ownership problems mention nobody.
+    notify = None if event.kind == "owner" else record["owner_login"]
+    return Outcome(False, record["id"], event.version, label + ": " + event.reason_tr, label + ": " + event.reason_en, notify, changed)
 
 
 def _issue_title(record, event):
     head = " ".join(p for p in (record["id"], event.version) if p)
     if event.kind == "hidden":
         return head + " listeden çıkarıldı / hidden from the store"
+    if event.kind == "owner":
+        return head + " sahiplik sorunu / ownership problem"
     return head + " reddedildi / rejected"
 
 
 def _issue_body(outcome):
-    return "@%s\n\n%s\n\n%s\n" % (outcome.notify_login, outcome.message_tr, outcome.message_en)
+    mention = "@%s\n\n" % outcome.notify_login if outcome.notify_login else ""
+    return "%s%s\n\n%s\n" % (mention, outcome.message_tr, outcome.message_en)
 
 
 # Package checks
@@ -238,8 +243,10 @@ def _same_repo(gh, record, repo, full_name):
         return True
     try:
         old = gh.get_repo(record["repo"])
-    except GitHubError:
-        return False
+    except GitHubError as e:
+        if e.status == 404:
+            return False
+        raise
     return old.owner_id == record["owner_id"] == repo.owner_id and old.full_name.lower() == full_name.lower()
 
 
@@ -299,7 +306,31 @@ def _scan_record(gh, record, release, explicit=False, info=None, repo=None):
 
 
 def _new_record(info, asset, release, repo, full_name):
-    return {"id": info.id, "owner_id": repo.owner_id, "owner_login": repo.owner_login, "repo": full_name, "removed": False, "hidden_reason": None, "current": _current(info, asset, release), "rejected_versions": [], "reported_asset_change": None, "checked_asset": None}
+    return {"id": info.id, "owner_id": repo.owner_id, "owner_login": repo.owner_login, "repo": full_name, "removed": False, "hidden_reason": None, "current": _current(info, asset, release), "rejected_versions": [], "reported_asset_change": None, "reported_owner_mismatch": None, "checked_asset": None}
+
+
+def _scan_one(gh, record):
+    """Scans one record, checking the repository owner first so a name taken over by someone else never alters it."""
+    try:
+        repo = gh.get_repo(record["repo"])
+    except GitHubError as e:
+        if e.status != 404:
+            raise
+        # The repository is gone; the integrity check then reports the missing file.
+        repo = None
+    if repo is not None:
+        if repo.owner_type != "User" or repo.owner_id != record["owner_id"]:
+            key = "%s:%s" % (repo.owner_type, repo.owner_id)
+            if record.get("reported_owner_mismatch") == key:
+                return []
+            # Only the deduplication key is stored; the add-on itself stays exactly as it was.
+            record["reported_owner_mismatch"] = key
+            ver = (record.get("current") or {}).get("version")
+            return [_Event("owner", ver, "`%s` reposu artık eklentinin kayıtlı sahibine ait değil (şimdiki sahip: %s %s). Eklenti olduğu gibi bırakıldı, sahiplik düzelene kadar güncelleme alınmaz. Depo yöneticisinin incelemesi gerekiyor." % (record["repo"], repo.owner_type, repo.owner_id), "the repository `%s` no longer belongs to the registered owner of the add-on (current owner: %s %s). The add-on is left as it is and gets no updates until ownership is fixed. The registry maintainer needs to review this." % (record["repo"], repo.owner_type, repo.owner_id), True)]
+        if record.get("reported_owner_mismatch") is not None:
+            record["reported_owner_mismatch"] = None
+        _refresh_names(record, repo)
+    return _scan_record(gh, record, gh.latest_release(record["repo"]), repo=repo)
 
 
 def _explicit_outcome(record, events, was_removed, changed):
@@ -361,7 +392,11 @@ def register(gh, addons_dir, release_url, author_id, author_login):
         return _published(info.id, info.version, save(addons_dir, record))
     if record["owner_id"] != author_id:
         return _register_rejected("bu kimlik başka bir hesaba ait.", "this id belongs to another account.", info.id, info.version)
-    if not _same_repo(gh, record, repo, full_name):
+    try:
+        same = _same_repo(gh, record, repo, full_name)
+    except GitHubError:
+        return _register_rejected("GitHub'a ulaşılamadı. Biraz sonra formu yeniden gönderin.", "GitHub could not be reached. Submit the form again a little later.", info.id, info.version)
+    if not same:
         return _register_rejected("bu kimlik `%s` reposuna bağlı, başka bir repodan yayınlanamaz." % record["repo"], "this id is bound to the repository `%s` and cannot be published from another one." % record["repo"], info.id, info.version)
     was_removed = bool(record.get("removed"))
     record["removed"] = False
@@ -404,8 +439,16 @@ def scan(gh, addons_dir):
         if record.get("removed"):
             continue
         # One record must never stop the others: a failure leaves it unsaved and the next scan retries it.
+        # Issues are opened before the save, so a failed save or issue can repeat an issue but never lose one.
+        found = []
         try:
-            events = _scan_record(gh, record, gh.latest_release(record["repo"]))
+            for event in _scan_one(gh, record):
+                if event.kind == "ignored":
+                    continue
+                outcome = _event_outcome(record, event, False)
+                if event.issue:
+                    gh.open_issue(_issue_title(record, event), _issue_body(outcome))
+                found.append(outcome)
             changed = save(addons_dir, record)
         except GitHubError as e:
             outcomes.append(_scan_failed(record, "GitHub'a ulaşılamadı", "GitHub could not be reached", e))
@@ -414,13 +457,9 @@ def scan(gh, addons_dir):
             _log.exception("scan of %s failed", record["id"])
             outcomes.append(_scan_failed(record, "beklenmeyen hata", "unexpected error", "%s: %s" % (type(e).__name__, e)))
             continue
-        for event in events:
-            if event.kind == "ignored":
-                continue
-            outcome = _event_outcome(record, event, changed)
-            if event.issue:
-                gh.open_issue(_issue_title(record, event), _issue_body(outcome))
-            outcomes.append(outcome)
+        for outcome in found:
+            outcome.changed = changed
+        outcomes.extend(found)
     return outcomes
 
 

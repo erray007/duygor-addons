@@ -494,3 +494,69 @@ def test_real_client_open_issue_needs_a_number():
         client.open_issue("t", "b")
     client._opener = _Opener(_Response([b'{"number": 12}']))
     assert client.open_issue("t", "b") == 12
+
+
+def test_scan_refreshes_names_after_rename_without_release(gh, addons):
+    register_demo(gh, addons)
+    gh.rename(REPO, "alice2/renamed", "alice2")
+    assert registry.scan(gh, addons) == []
+    r = record(addons)
+    assert r["repo"] == "alice2/renamed" and r["owner_login"] == "alice2" and r["hidden_reason"] is None
+    assert gh.issues == []
+    assert registry.build_index(addons, True)["addons"][0]["owner"] == "alice2"
+
+
+def test_scan_squatter_on_old_name_leaves_record_alone(gh, addons):
+    register_demo(gh, addons)
+    before = record(addons)
+    gh.rename(REPO, "alice2/renamed", "alice2")
+    gh.add_repo(REPO, BOB, "alice")
+    gh.publish(REPO, "notes", None, extra=[("notes.txt", b"x")])
+    outcomes = registry.scan(gh, addons)
+    assert len(outcomes) == 1 and not outcomes[0].ok and outcomes[0].notify_login is None
+    assert len(gh.issues) == 1 and "@" not in gh.issues[0][1] and "demo" in gh.issues[0][0]
+    after = record(addons)
+    assert after.pop("reported_owner_mismatch") == "User:%d" % BOB
+    before.pop("reported_owner_mismatch")
+    assert after == before and after["hidden_reason"] is None
+    gh.publish(REPO, "v9", package(ver="9.0"))
+    assert registry.scan(gh, addons) == [] and len(gh.issues) == 1
+    assert record(addons)["current"]["version"] == "1.0"
+    assert [a["id"] for a in registry.build_index(addons, True)["addons"]] == ["demo"]
+    gh.repos.pop(REPO)
+    gh.releases.pop(REPO)
+    registry.scan(gh, addons)
+    r = record(addons)
+    assert r["repo"] == "alice2/renamed" and r["reported_owner_mismatch"] is None and r["hidden_reason"] is None
+
+
+def test_scan_survives_failing_open_issue(gh, addons):
+    gh.add_repo("alice/aaa", ALICE)
+    release = gh.publish("alice/aaa", "v1", package("aaa", "1.0"))
+    assert registry.register(gh, addons, gh.url_of(release), ALICE, "alice").ok
+    register_demo(gh, addons)
+    gh.publish("alice/aaa", "v2", make_zip({"manifest.json": {"kimlik": "aaa", "surum": "2.0"}}))
+    gh.publish(REPO, "v1.1", package(ver="1.1"))
+    real_open = gh.open_issue
+
+    def failing_open(title, body):
+        raise GitHubError(502, "bad gateway")
+
+    gh.open_issue = failing_open
+    outcomes = registry.scan(gh, addons)
+    assert [(o.addon_id, o.ok) for o in outcomes] == [("aaa", False), ("demo", True)]
+    assert record(addons, "aaa")["rejected_versions"] == []
+    assert record(addons)["current"]["version"] == "1.1"
+    gh.open_issue = real_open
+    registry.scan(gh, addons)
+    assert len(gh.issues) == 1 and gh.issues[0][0].startswith("aaa 2.0")
+
+
+def test_register_rename_check_transient_error(gh, addons):
+    register_demo(gh, addons)
+    gh.rename(REPO, "alice/new-name")
+    release = gh.publish("alice/new-name", "v1.1", package(ver="1.1"))
+    gh.failing.add(REPO)
+    outcome = registry.register(gh, addons, gh.url_of(release), ALICE, "alice")
+    assert not outcome.ok and "could not be reached" in outcome.message_en and "bound" not in outcome.message_en
+    assert record(addons)["repo"] == REPO
