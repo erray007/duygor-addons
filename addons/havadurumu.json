@@ -1,0 +1,38 @@
+{
+  "checked_asset": null,
+  "current": {
+    "asset_id": 735293342,
+    "asset_updated_at": "2026-11-11T11:34:44Z",
+    "author": "Eray",
+    "changelog": "İlk mağaza sürümü.\n\nFirst store release.",
+    "descriptions": {
+      "en": "Current weather, daily and hourly forecast. Data from Open-Meteo, no API key needed.",
+      "tr": "Anlık hava durumu, günlük ve saatlik tahmin. Veriler Open-Meteo'dan, anahtar gerekmez."
+    },
+    "languages": [
+      "en",
+      "tr"
+    ],
+    "min_version": 537,
+    "names": {
+      "en": "Weather",
+      "tr": "Hava Durumu"
+    },
+    "published": "2026-11-11T11:34:45Z",
+    "sha256": "3b41573ba480718e5a12d0aec36c0ec62add607de76148c0e215e8719a439fb5",
+    "size": 10611,
+    "source_language": "en",
+    "url": "https://github.com/erray007/duygor-addon-havadurumu/releases/download/v1.2/havadurumu.dgp",
+    "version": "1.2"
+  },
+  "hidden_reason": null,
+  "id": "havadurumu",
+  "owner_id": 161474134,
+  "owner_login": "erray007",
+  "registered_at": "2026-11-11T11:37:37Z",
+  "rejected_versions": [],
+  "removed": false,
+  "repo": "erray007/duygor-addon-havadurumu",
+  "reported_asset_change": null,
+  "reported_owner_mismatch": null
+}
