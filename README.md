@@ -10,6 +10,18 @@ rules, so the two must stay identical.
   `id`, `version`, `lang`.
 - `duygor_registry.language`: language tag normalization.
 
+- `duygor_registry.github`: minimal GitHub REST client (`GITHUB_TOKEN`, urllib) and
+  `parse_release_url`.
+- `duygor_registry.registry`: `register`, `remove`, `scan`, `build_index`. State is one record per
+  add-on in `addons/<id>.json`; an id belongs forever to the numeric GitHub user id and the
+  repository that first registered it.
+- `duygor_registry.cli`: what the workflows run:
+  - `register --issue-json <path>` / `remove --issue-json <path>`: the file holds
+    `{"issue_number", "author_id", "author_login", "body"}`; prints
+    `{ok, message_tr, message_en, changed, comment}`.
+  - `scan`: prints the issues to open as `[{title, body}]`.
+  - `build-index --out site/index.json`: `storeEnabled` comes from `config.json`.
+
 Python 3.11, standard library only.
 
 ## Running the tests

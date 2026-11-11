@@ -163,6 +163,32 @@ def _collect_languages(entries):
     return tables
 
 
+def peek_version(data):
+    """Best-effort manifest version of a package that may have failed inspect(); None when unreadable or not a store version.
+
+    Lets the registry tell "a broken newer release" from "a broken release that is not newer anyway".
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            info = zf.getinfo("manifest.json")
+            if info.file_size > MAX_BYTES:
+                return None
+            with zf.open(info) as src:
+                raw = src.read(MAX_BYTES + 1)
+    except (KeyError, *_ZIP_ERRORS):
+        return None
+    if len(raw) > MAX_BYTES:
+        return None
+    try:
+        obj = _decode_json(raw)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    found = _opt_string(obj, "surum", _opt_string(obj, "version", DEFAULT_VERSION)).strip(_TRIM)
+    return found if version.is_valid(found) else None
+
+
 def inspect(data):
     """Validates a package and returns its PackageInfo; raises PackageError when invalid."""
     if len(data) > MAX_BYTES:
