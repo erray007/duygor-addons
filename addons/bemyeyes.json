@@ -1,0 +1,38 @@
+{
+  "checked_asset": null,
+  "current": {
+    "asset_id": 735292876,
+    "asset_updated_at": "2026-11-11T11:34:33Z",
+    "author": "Eray",
+    "changelog": "İlk mağaza sürümü.\n\nFirst store release.",
+    "descriptions": {
+      "en": "Sends the screen or the focused item to Be My Eyes. Works with the screen curtain on.",
+      "tr": "Ekranın ya da odaktaki öğenin görüntüsünü Be My Eyes'a gönderir. Ekran perdesi açıkken de çalışır."
+    },
+    "languages": [
+      "en",
+      "tr"
+    ],
+    "min_version": 537,
+    "names": {
+      "en": "Be My Eyes",
+      "tr": "Be My Eyes"
+    },
+    "published": "2026-11-11T11:34:34Z",
+    "sha256": "b0559a6c472ffb8545fbdcb4d211b98d380fc73145bfbed8b5dece63fbbf9085",
+    "size": 1929,
+    "source_language": "en",
+    "url": "https://github.com/erray007/duygor-addon-bemyeyes/releases/download/v1.3/bemyeyes.dgp",
+    "version": "1.3"
+  },
+  "hidden_reason": null,
+  "id": "bemyeyes",
+  "owner_id": 161474134,
+  "owner_login": "erray007",
+  "registered_at": "2026-11-11T11:36:10Z",
+  "rejected_versions": [],
+  "removed": false,
+  "repo": "erray007/duygor-addon-bemyeyes",
+  "reported_asset_change": null,
+  "reported_owner_mismatch": null
+}
