@@ -55,6 +55,7 @@ jobs:
         run: bash .github/scripts/commit_registry.sh
       - name: Sweep open form issues that lost their run
         id: sweep
+        if: ${{ !cancelled() }}
         run: python .github/scripts/sweep_issues.py
 
   pages:

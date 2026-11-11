@@ -13,6 +13,7 @@ comment, which is posted once per pending version) and stays open until a mainta
 DECISIONS (review_issue.py); the sweep never resubmits it.
 """
 
+import hashlib
 import json
 import os
 import subprocess
@@ -35,6 +36,7 @@ LABELS = {
 }
 ERROR_MARKER = "<!-- duygor-registry-error -->"
 PENDING_MARKER = "<!-- duygor-pending:%s:%s -->"
+RESULT_MARKER = "<!-- duygor-result:%s -->"
 HERE = os.path.dirname(os.path.abspath(__file__))
 ERROR_MESSAGE = os.path.join(HERE, "..", "messages", "registry-error.md")
 
@@ -83,18 +85,27 @@ def command_for(issue):
     return commands.pop() if len(commands) == 1 else None
 
 
-def decision_for(issue):
-    """approve/reject for an open, human-opened submit issue awaiting approval with exactly one decision label; else None."""
+def decisions_on(issue):
+    """approve/reject for every decision label on an open, human-opened submit issue awaiting approval."""
     labels = open_human_labels(issue)
     if labels is None or SUBMIT_LABEL not in labels or PENDING_LABEL not in labels or "eklenti-kaldir" in labels:
-        return None
-    decisions = [command for label, command in DECISIONS.items() if label in labels]
+        return []
+    return [command for label, command in DECISIONS.items() if label in labels]
+
+
+def decision_for(issue):
+    """The one decision of an issue awaiting approval; None without one or with both."""
+    decisions = decisions_on(issue)
     return decisions[0] if len(decisions) == 1 else None
 
 
 def action_for(issue):
     """What the sweep does with an issue: approve/reject, register/remove, or None (skip)."""
     return decision_for(issue) or command_for(issue)
+
+
+def live_issue(number):
+    return json.loads(gh("api", "repos/%s/issues/%s" % (repo(), number)).stdout)
 
 
 def comment_from_file(number, text):
@@ -117,8 +128,9 @@ def finish(number, comment, labels=None):
     """Answers an issue and closes it, dropping the approval labels so a reopened issue never replays a decision.
 
     labels are the issue's known label names; when unknown (None) every approval label is removed.
+    The comment carries a marker of its own text, so a retry after a partial failure does not repeat it.
     """
-    comment_from_file(number, comment)
+    comment_once(number, RESULT_MARKER % hashlib.sha256(comment.encode("utf-8")).hexdigest()[:16], comment)
     for label in (PENDING_LABEL, *DECISIONS):
         if labels is None or label in labels:
             remove_label(number, label)
@@ -126,10 +138,13 @@ def finish(number, comment, labels=None):
 
 
 def finish_related(result):
-    """Answers and closes the other issues the CLI result names (e.g. every issue of a published record)."""
+    """Answers and closes the other open issues the CLI result names (e.g. every issue of a published record)."""
     for item in result.get("related") or []:
         if isinstance(item, dict) and isinstance(item.get("number"), int) and isinstance(item.get("comment"), str):
-            finish(item["number"], defuse_body(item["comment"]))
+            issue = live_issue(item["number"])
+            # Already closed (by its author, or earlier in this run): nothing to answer.
+            if issue.get("state") == "open":
+                finish(item["number"], defuse_body(item["comment"]), {label.get("name") for label in issue.get("labels") or []})
 
 
 def post_failure(number):

@@ -475,6 +475,40 @@ def test_script_removes_a_non_maintainer_label_before_the_consistency_check(env,
     assert stored(env) is None and hub.issues[5]["state"] == "closed" and hub.names(5) == {"eklenti-gonder"}
 
 
+@pytest.mark.parametrize("stray_first", [True, False])
+def test_sweep_clears_a_stray_label_and_applies_the_maintainers(env, hub, stray_first):
+    import sweep_issues
+    hub.open(5, submit_body(env.url), "eklenti-gonder")
+    process_issue.process(hub.issues[5])
+    labels = [("reddedildi", BOB), ("onaylandi", MAINTAINER)]
+    for name, actor in labels if stray_first else labels[::-1]:
+        hub.label(5, name, actor)
+    assert process_issue.action_for(hub.issues[5]) is None
+    assert sweep_issues.handle(json.loads(json.dumps(hub.issues[5]))) == 0
+    assert hub.issues[5]["state"] == "closed" and hub.names(5) == {"eklenti-gonder"}
+    assert trusted_ids() == [ALICE] and index(env) == {"demo": "1.0"}
+    assert sum(c.startswith("<!-- duygor-review-denied -->") for c in hub.comments[5]) == 1
+
+
+def test_finish_skips_closed_related_issues_and_never_repeats_a_comment(env, hub):
+    hub.open(5, submit_body(env.url), "eklenti-gonder")
+    process_issue.process(hub.issues[5])
+    hub.open(6, submit_body(env.url), "eklenti-gonder")
+    process_issue.process(hub.issues[6])
+    # The author closed issue 6 themselves.
+    hub.set_state(6, "closed")
+    before = len(hub.comments[6])
+    hub.label(5, "onaylandi", MAINTAINER)
+    assert review(hub, 5, "approve", MAINTAINER) == 0
+    assert len(hub.comments[6]) == before and hub.issues[5]["state"] == "closed"
+    # A retry after a partial failure posts the same result only once.
+    hub.open(7, "x")
+    process_issue.finish(7, "done")
+    process_issue.finish(7, "done")
+    process_issue.finish(7, "other")
+    assert len(hub.comments[7]) == 2 and hub.comments[7][0].startswith("<!-- duygor-result:")
+
+
 def test_script_withdrawal_closes_the_submit_issue(env, hub):
     hub.open(5, submit_body(env.url), "eklenti-gonder")
     process_issue.process(hub.issues[5])

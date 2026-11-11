@@ -21,21 +21,33 @@ def open_issues(label):
 
 
 def handle(issue):
-    """0 when handled or skipped, 1 when it failed."""
-    action = process_issue.action_for(issue)
-    if action is None:
-        sys.stderr.write("issue %s skipped\n" % issue.get("number"))
-        return 0
-    if action in process_issue.COMMANDS.values():
+    """0 when handled or skipped, 1 when it failed.
+
+    On an issue awaiting approval every decision label present is reviewed, so a stray label from a
+    non-maintainer (whose own run was lost) is removed and the maintainer's label is then applied
+    instead of both staying stuck. A second pass applies the label that was blocked in the first.
+    """
+    decisions = process_issue.decisions_on(issue)
+    if not decisions:
+        action = process_issue.command_for(issue)
+        if action is None:
+            sys.stderr.write("issue %s skipped\n" % issue.get("number"))
+            return 0
         return process_issue.process(issue)
-    # A decision earlier in this sweep may have closed it (related issues), so the live copy decides.
-    try:
-        issue = json.loads(process_issue.gh("api", "repos/%s/issues/%s" % (process_issue.repo(), issue["number"])).stdout)
-    except Exception as e:
-        sys.stderr.write("issue %s: could not read it: %s\n" % (issue.get("number"), e))
-        return 1
-    action = process_issue.decision_for(issue)
-    return review_issue.review(issue, action) if action else 0
+    number = issue["number"]
+    for command in decisions + [None]:
+        # Each step reads the live copy: an earlier one (or a decision on another issue in this sweep) may have changed it.
+        try:
+            issue = process_issue.live_issue(number)
+        except Exception as e:
+            sys.stderr.write("issue %s: could not read it: %s\n" % (number, e))
+            return 1
+        command = command or process_issue.decision_for(issue)
+        if command is None or command not in process_issue.decisions_on(issue):
+            continue
+        if review_issue.review(issue, command):
+            return 1
+    return 0
 
 
 def main():

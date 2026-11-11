@@ -71,8 +71,11 @@ Approval is per author (numeric GitHub user id), not per add-on. Maintainers are
   is pending, the sweep applies the label.
 - From then on the author's new releases (hourly scan) and new add-ons (submit form) publish
   automatically.
-- The sweep never resubmits an `onay-bekliyor` issue. It applies a decision label whose Review run
-  was lost, with the same checks. If a decision still seems stuck, removing and re-adding the
+- The sweep (run by the Submit, Review and hourly Scan workflows, even after an earlier step
+  failed) never resubmits an `onay-bekliyor` issue. It reviews every decision label on such an issue,
+  with the same checks: a stray label from a non-maintainer is removed first, then the maintainer's
+  label is applied, so the two never stay stuck together. Result comments carry a marker of their
+  text and closing skips issues that are already closed, so a retried run does not repeat itself. If a decision still seems stuck, removing and re-adding the
   label starts a new Review run.
 
 Labels: `eklenti-gonder`, `eklenti-kaldir` (forms), `onay-bekliyor`, `onaylandi`, `reddedildi`
