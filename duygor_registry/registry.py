@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import sys
 import tempfile
 from dataclasses import dataclass
 
@@ -30,16 +31,26 @@ MAX_AUTHOR = 100
 MAX_DESCRIPTION = 2000
 MAX_LANGUAGES = 64
 MAX_CHANGELOG = 10000
+# Every entry fits this budget, so at least 31 add-ons always fit the index whatever their content.
+MAX_ENTRY_BYTES = 64 * 1024
 MAX_INDEX_BYTES = 2 * 1024 * 1024
 RECORD_EXTENSION = ".json"
+# Longest GitHub login (39) and owner/repo name (39 + 1 + 100): the budget check holds after any rename.
+_PLACEHOLDER_OWNER = "x" * 39
+_PLACEHOLDER_REPO = "x" * 140
 
 _ID = package.ID
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+# A Python str fails UTF-8 encoding only on lone surrogates, which JSON escapes such as \ud800 produce.
+_SURROGATE = re.compile("[\ud800-\udfff]")
 _log = logging.getLogger(__name__)
 
 
 class IndexTooLarge(ValueError):
-    """build_index refuses to produce an index the app could not read; nothing is published then."""
+    """Last-resort guard: build_index never returns an index the app could not read.
+
+    Entries are budgeted and dropped to fit, so only an empty index over the cap could raise it.
+    """
 
 
 @dataclass
@@ -193,23 +204,36 @@ def _limit_error(what_tr, what_en, limit):
     return PackageError("limit", "%s %d karakterden uzun olamaz." % (what_tr, limit), "%s cannot be longer than %d characters." % (what_en, limit))
 
 
+def _check_text(text, limit, what_tr, what_en):
+    if limit is not None and len(text) > limit:
+        raise _limit_error(what_tr, what_en, limit)
+    if _SURROGATE.search(text):
+        raise PackageError("encoding", "%s UTF-8'e çevrilemeyen geçersiz bir karakter içeriyor (eşi olmayan vekil, ör. \\ud800)." % what_tr, "%s contains an invalid character that cannot be encoded as UTF-8 (a lone surrogate such as \\ud800)." % what_en)
+
+
 def _check_texts(texts, limit, what_tr, what_en):
     for tag in sorted(texts):
-        if len(texts[tag]) > limit:
-            raise _limit_error("%s (%s)" % (what_tr, tag), "%s (%s)" % (what_en, tag), limit)
+        _check_text(texts[tag], limit, "%s (%s)" % (what_tr, tag), "%s (%s)" % (what_en, tag))
 
 
-def _inspect(data):
+def _inspect(data, release, asset):
     """package.inspect plus the limits the app's index parser applies on top of it and the store's size limits."""
     info = package.inspect(data)
     if not 0 <= info.min_version <= MAX_MIN_VERSION:
         raise PackageError("min_version", "manifest.json: minDuygorSurumu geçersiz: %d" % info.min_version, "manifest.json: minDuygorSurumu is invalid: %d" % info.min_version)
     if len(info.languages) > MAX_LANGUAGES:
         raise PackageError("limit", "en fazla %d dil dosyası olabilir, %d bulundu." % (MAX_LANGUAGES, len(info.languages)), "at most %d language files are allowed, found %d." % (MAX_LANGUAGES, len(info.languages)))
-    if len(info.author) > MAX_AUTHOR:
-        raise _limit_error("manifest.json: yazar", "manifest.json: the author", MAX_AUTHOR)
+    _check_text(info.author, MAX_AUTHOR, "manifest.json: yazar", "manifest.json: the author")
     _check_texts(info.names, MAX_NAME, "Eklenti adı", "The add-on name")
     _check_texts(info.descriptions, MAX_DESCRIPTION, "Eklenti açıklaması", "The add-on description")
+    _check_text(_changelog(release), None, "Release notları", "The release notes")
+    # Measured as build_index would emit it, with the longest owner and repository names GitHub allows.
+    try:
+        size = _entry_size(_entry_fields(info.id, _PLACEHOLDER_OWNER, _PLACEHOLDER_REPO, _current(info, asset, release)))
+    except UnicodeEncodeError:
+        raise PackageError("encoding", "Release bilgileri UTF-8'e çevrilemeyen geçersiz bir karakter içeriyor.", "The release details contain an invalid character that cannot be encoded as UTF-8.") from None
+    if size > MAX_ENTRY_BYTES:
+        raise PackageError("entry_size", "eklenti mağaza dizininde %d bayt yer tutuyor, en fazla %d olabilir. Adları, açıklamaları ya da Release notlarını kısaltın (denetim karakterleri 6 bayt sayılır)." % (size, MAX_ENTRY_BYTES), "the add-on takes %d bytes in the store index, at most %d are allowed. Shorten the names, descriptions or release notes (control characters count as 6 bytes)." % (size, MAX_ENTRY_BYTES))
     return info
 
 
@@ -238,7 +262,7 @@ def _try_update(gh, record, release, asset, info=None, repo=None):
     try:
         if info is None:
             data = _fetch(gh, asset)
-            info = _inspect(data)
+            info = _inspect(data, release, asset)
     except PackageError as e:
         found = package.peek_version(data) if data is not None else None
         # A broken release that is not newer is ignored like any other older release.
@@ -413,7 +437,7 @@ def register(gh, addons_dir, release_url, author_id, author_login):
     if repo.owner_id != author_id:
         return _register_rejected("formu gönderen hesap `%s` reposunun sahibi değil." % release.repo, "the account that submitted the form does not own the repository `%s`." % release.repo)
     try:
-        info = _inspect(_fetch(gh, asset))
+        info = _inspect(_fetch(gh, asset), release, asset)
     except PackageError as e:
         return _register_rejected("paket geçersiz: " + _safe(e.message_tr), "the package is invalid: " + _safe(e.message_en))
     except GitHubError:
@@ -500,30 +524,72 @@ def _is_int(value):
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _entry_fields(addon_id, owner, repo, c):
+    return {"id": addon_id, "version": c["version"], "minVersion": c["min_version"], "author": c["author"], "owner": owner, "repo": repo, "url": c["url"], "sha256": c["sha256"], "size": c["size"], "changelog": c["changelog"], "published": c["published"], "sourceLanguage": c["source_language"], "languages": c["languages"], "name": c["names"], "description": c["descriptions"]}
+
+
 def _entry(record):
     """The index entry of a record, or None when it would not pass the app's own entry checks."""
     c = record.get("current")
     if not isinstance(c, dict):
         return None
     try:
-        e = {"id": record["id"], "version": c["version"], "minVersion": c["min_version"], "author": c["author"], "owner": record["owner_login"], "repo": record["repo"], "url": c["url"], "sha256": c["sha256"], "size": c["size"], "changelog": c["changelog"], "published": c["published"], "sourceLanguage": c["source_language"], "languages": c["languages"], "name": c["names"], "description": c["descriptions"]}
+        e = _entry_fields(record["id"], record["owner_login"], record["repo"], c)
     except KeyError:
         return None
     valid = isinstance(e["id"], str) and _ID.fullmatch(e["id"]) and version.is_valid(e["version"]) and _is_int(e["minVersion"]) and 0 <= e["minVersion"] <= MAX_MIN_VERSION and isinstance(e["url"], str) and e["url"].startswith("https://") and isinstance(e["sha256"], str) and _SHA256.fullmatch(e["sha256"]) and _is_int(e["size"]) and 0 < e["size"] <= package.MAX_BYTES
     return e if valid else None
 
 
+def _compact(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _entry_size(entry):
+    """Bytes the entry takes inside index.json; UnicodeEncodeError on text that is not valid UTF-8."""
+    return len(_compact(entry).encode("utf-8"))
+
+
+def _keep_order(item):
+    """Established add-ons first: by publication time, then id; an entry without a usable time comes last."""
+    published = item[0]["published"]
+    dated = isinstance(published, str)
+    return (not dated, published if dated else "", item[0]["id"])
+
+
 def build_index(addons_dir, store_enabled):
-    """The index.json document the app reads; removed and hidden add-ons are left out. Raises IndexTooLarge."""
-    addons = []
-    for record in records(addons_dir):
-        if record.get("removed") or record.get("hidden_reason"):
-            continue
-        entry = _entry(record)
-        if entry is not None:
-            addons.append(entry)
-    addons.sort(key=lambda e: e["id"])
-    index = {"schema": INDEX_SCHEMA, "storeEnabled": bool(store_enabled), "movedTo": None, "addons": addons}
+    """The index.json document the app reads; removed and hidden add-ons are left out.
+
+    With the store disabled no record is read at all, so the kill switch always deploys. Entries over
+    MAX_ENTRY_BYTES are skipped; when the rest would reach MAX_INDEX_BYTES the newest are dropped until
+    it fits. Each skipped or dropped id is reported on stderr.
+    """
+    index = {"schema": INDEX_SCHEMA, "storeEnabled": bool(store_enabled), "movedTo": None, "addons": []}
+    if store_enabled:
+        kept = []
+        for record in records(addons_dir):
+            if record.get("removed") or record.get("hidden_reason"):
+                continue
+            entry = _entry(record)
+            if entry is None:
+                continue
+            try:
+                size = _entry_size(entry)
+            except UnicodeEncodeError:
+                sys.stderr.write("skipped %s: index entry is not valid UTF-8\n" % entry["id"])
+                continue
+            if size > MAX_ENTRY_BYTES:
+                sys.stderr.write("skipped %s: index entry is %d bytes (limit %d)\n" % (entry["id"], size, MAX_ENTRY_BYTES))
+                continue
+            kept.append((entry, size))
+        kept.sort(key=_keep_order)
+        # The entries sit between the brackets of the empty list, separated by commas.
+        total = len(index_json(index).encode("utf-8")) + sum(size for _, size in kept) + max(len(kept) - 1, 0)
+        while kept and total >= MAX_INDEX_BYTES:
+            entry, size = kept.pop()
+            total -= size + (1 if kept else 0)
+            sys.stderr.write("dropped %s: index.json would reach %d bytes (newest add-ons go first)\n" % (entry["id"], MAX_INDEX_BYTES))
+        index["addons"] = sorted((entry for entry, _ in kept), key=lambda e: e["id"])
     # The app refuses bodies over 4 MB, which would also hide the kill switch, so an oversized index is never built.
     size = len(index_json(index).encode("utf-8"))
     if size >= MAX_INDEX_BYTES:
@@ -533,4 +599,4 @@ def build_index(addons_dir, store_enabled):
 
 def index_json(index):
     """Deterministic serialization, so an unchanged registry yields a byte-identical file."""
-    return json.dumps(index, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    return _compact(index) + "\n"

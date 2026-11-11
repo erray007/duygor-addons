@@ -24,8 +24,13 @@ rules, so the two must stay identical.
 
 Store limits on top of the install rules (`registry._inspect`): name at most 100 characters in
 every language, author at most 100, description at most 2000, at most 64 language files; such
-packages are rejected. Release notes are cut to 10000 characters. `build-index` fails (exit 2,
-nothing written) when index.json would reach 2 MB, so an oversized index is never published.
+packages are rejected. Release notes are cut to 10000 characters. Text that cannot be encoded as
+UTF-8 (lone surrogates such as `\ud800`) in the name, description, author or release notes is
+rejected. Each add-on's index entry, measured exactly as index.json is written (control characters
+escaped as `\u00XX` count 6 bytes), may take at most 64 KiB; a larger package is rejected at
+register and scan, and a stored record over the budget is skipped by `build-index`. index.json
+stays under 2 MiB: when the entries would not fit, `build-index` drops the newest (by Release
+`published` time) until it does, printing `dropped <id>` to stderr, so established add-ons stay.
 
 Python 3.11, standard library only.
 
@@ -38,13 +43,18 @@ Run workflow** (workflow_dispatch). The scan rebuilds the index, commits it and 
 app sees the change on its next store refresh.
 
 - Kill switch (turn the store off for every user): set `"storeEnabled": false` in `config.json`,
-  push, run Scan. Set it back to `true` the same way to turn the store on again.
+  push, run Scan. The index is then built without reading any record (`"addons": []`), so it always
+  deploys, whatever state the add-on records are in. Set it back to `true` the same way to turn
+  the store on again.
 - Take one add-on off the store: set `"removed": true` in `addons/<id>.json` (the id stays
   reserved for its owner, who can republish it with the submit form), or delete
   `addons/<id>.json` to free the id entirely; push, run Scan.
-- If the Scan's "Build the index" step fails with `index.json would be ... too large`, nothing was
-  published and the previous index stays live. Remove the largest add-ons as above in the same
-  push as any other change, then run Scan again.
+- Oversized add-ons never block a deploy: `build-index` skips entries over 64 KiB (`skipped <id>`)
+  and drops the newest add-ons while index.json would reach 2 MiB (`dropped <id>`), both on the
+  "Build the index" step's stderr. If those lines appear, take the spam add-ons off as above so the
+  dropped legitimate ones come back on the next Scan. A failure with `index.json would be ... too
+  large` can then only come from a broken build (even the empty index too big); the previous index
+  stays live.
 
 ## Running the tests
 

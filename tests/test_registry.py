@@ -394,8 +394,140 @@ def test_build_index_shape(gh, addons):
 def test_build_index_store_disabled(gh, addons):
     register_demo(gh, addons)
     index = registry.build_index(addons, False)
-    assert index["storeEnabled"] is False and len(index["addons"]) == 1
+    assert index == {"schema": 1, "storeEnabled": False, "movedTo": None, "addons": []}
     assert registry.build_index(os.path.join(addons, "missing"), True)["addons"] == []
+
+
+def test_kill_switch_ignores_records(gh, addons, monkeypatch):
+    register_demo(gh, addons)
+    with open(os.path.join(addons, "broken.json"), "w", encoding="utf-8") as f:
+        f.write("{not json")
+    monkeypatch.setattr(registry, "MAX_INDEX_BYTES", 80)
+    index = registry.build_index(addons, False)
+    assert index == {"schema": 1, "storeEnabled": False, "movedTo": None, "addons": []}
+    with pytest.raises(ValueError):
+        registry.build_index(addons, True)
+
+
+def entry_size(entry):
+    return len(json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+
+
+def write_record(addons, r):
+    with open(os.path.join(addons, r["id"] + ".json"), "w", encoding="utf-8") as f:
+        json.dump(r, f)
+
+
+def test_build_index_entry_budget(gh, addons, capsys):
+    assert registry.MAX_ENTRY_BYTES == 64 * 1024
+    register_demo(gh, addons)
+    good = record(addons)
+    entry = registry.build_index(addons, True)["addons"][0]
+    base = entry_size(entry) - len(entry["changelog"])
+    big = json.loads(json.dumps(good))
+    big["id"] = "bigg"
+    big["current"]["changelog"] = "\x01" * ((registry.MAX_ENTRY_BYTES - base) // 6) + "c" * ((registry.MAX_ENTRY_BYTES - base) % 6)
+    write_record(addons, big)
+    over = json.loads(json.dumps(big))
+    over["id"] = "over"
+    over["current"]["changelog"] += "c"
+    write_record(addons, over)
+    index = registry.build_index(addons, True)
+    assert [a["id"] for a in index["addons"]] == ["bigg", "demo"]
+    assert entry_size(index["addons"][0]) == registry.MAX_ENTRY_BYTES
+    assert "over" in capsys.readouterr().err
+
+
+def test_build_index_drops_newest_over_cap(gh, addons, capsys, monkeypatch):
+    register_demo(gh, addons)
+    template = record(addons)
+    sizes = {}
+    for i, addon_id in enumerate(["aold", "bmid", "cnew", "dnew"]):
+        r = json.loads(json.dumps(template))
+        r["id"] = addon_id
+        r["current"]["published"] = "2026-0%d-01T00:00:00Z" % (i + 2)
+        write_record(addons, r)
+    os.remove(os.path.join(addons, "demo.json"))
+    full = registry.index_json(registry.build_index(addons, True))
+    one = entry_size(json.loads(full)["addons"][0])
+    size = len(full.encode("utf-8"))
+    monkeypatch.setattr(registry, "MAX_INDEX_BYTES", size - 2 * (one + 1) + 1)
+    index = registry.build_index(addons, True)
+    assert [a["id"] for a in index["addons"]] == ["aold", "bmid"]
+    assert len(registry.index_json(index).encode("utf-8")) == size - 2 * (one + 1) < registry.MAX_INDEX_BYTES
+    err = capsys.readouterr().err
+    assert "dnew" in err and "cnew" in err and "aold" not in err and "bmid" not in err
+    monkeypatch.setattr(registry, "MAX_INDEX_BYTES", size - 2 * (one + 1))
+    assert [a["id"] for a in registry.build_index(addons, True)["addons"]] == ["aold"]
+
+
+def test_build_index_survives_crafted_entries(gh, addons):
+    register_demo(gh, addons)
+    template = record(addons)
+    worst = "\x01" * (registry.MAX_ENTRY_BYTES // 6)
+    for i in range(40):
+        r = json.loads(json.dumps(template))
+        r["id"] = "spam%02d" % i
+        r["current"]["published"] = "2027-01-01T00:%02d:00Z" % i
+        r["current"]["changelog"] = worst[: (registry.MAX_ENTRY_BYTES - 1000) // 6]
+        write_record(addons, r)
+    index = registry.build_index(addons, True)
+    ids = [a["id"] for a in index["addons"]]
+    assert "demo" in ids and 0 < len(ids) < 41 and "spam39" not in ids and "spam00" in ids
+    assert len(registry.index_json(index).encode("utf-8")) < registry.MAX_INDEX_BYTES
+
+
+def test_register_entry_budget_rejected(gh, addons):
+    outcome = register_entries(gh, addons, valid_entries(aciklama=escaped_description()), body="\x01" * registry.MAX_CHANGELOG)
+    assert not outcome.ok and str(registry.MAX_ENTRY_BYTES) in outcome.message_en and str(registry.MAX_ENTRY_BYTES) in outcome.message_tr
+    assert_bilingual(outcome)
+    assert os.listdir(addons) == []
+    assert register_entries(gh, addons, valid_entries(surum="1.1", aciklama=escaped_description()), "1.1", "\x01" * 7000).ok
+    assert registry.build_index(addons, True)["addons"][0]["changelog"] == "\x01" * 7000
+
+
+def escaped_description():
+    """The longest allowed description that JSON escapes to six bytes per character (the ends are trimmed otherwise)."""
+    return "a" + "\x02" * (registry.MAX_DESCRIPTION - 2) + "a"
+
+
+def test_scan_update_entry_budget_rejected(gh, addons):
+    register_demo(gh, addons)
+    description = escaped_description()
+    entries = valid_entries(surum="1.1", aciklama=description)
+    for tag in ("en", "de", "fr", "es", "it", "nl"):
+        entries["languages/%s.json" % tag] = {description: description}
+    gh.publish(REPO, "v1.1", make_zip(entries))
+    outcomes = registry.scan(gh, addons)
+    assert len(outcomes) == 1 and not outcomes[0].ok and str(registry.MAX_ENTRY_BYTES) in outcomes[0].message_en
+    assert record(addons)["current"]["version"] == "1.0"
+
+
+@pytest.mark.parametrize("key", ["ad", "yazar", "aciklama"])
+def test_register_unencodable_text_rejected(gh, addons, key):
+    outcome = register_entries(gh, addons, valid_entries(**{key: "a\ud800b"}))
+    assert not outcome.ok and "UTF-8" in outcome.message_en and "UTF-8" in outcome.message_tr
+    assert_bilingual(outcome)
+    assert os.listdir(addons) == []
+
+
+def test_register_unencodable_translation_and_changelog_rejected(gh, addons):
+    entries = valid_entries()
+    entries["languages/en.json"] = {"Demo": "\udfff"}
+    outcome = register_entries(gh, addons, entries)
+    assert not outcome.ok and "(en)" in outcome.message_en and "UTF-8" in outcome.message_en
+    outcome = register_entries(gh, addons, valid_entries(surum="1.1"), "1.1", "notes \ud83d")
+    assert not outcome.ok and "UTF-8" in outcome.message_en
+    assert os.listdir(addons) == []
+    assert register_entries(gh, addons, valid_entries(surum="1.2", ad="Demo \U0001f600"), "1.2", "ok \U0001f600").ok
+
+
+def test_scan_unencodable_update_rejected(gh, addons):
+    register_demo(gh, addons)
+    gh.publish(REPO, "v1.1", package(ver="1.1"), body="\ud800")
+    outcomes = registry.scan(gh, addons)
+    assert len(outcomes) == 1 and not outcomes[0].ok and "UTF-8" in outcomes[0].message_en
+    assert record(addons)["current"]["version"] == "1.0"
 
 
 def test_build_index_never_emits_invalid_entries(gh, addons):
@@ -417,9 +549,12 @@ def test_build_index_size_limit(gh, addons, monkeypatch):
     monkeypatch.setattr(registry, "MAX_INDEX_BYTES", size + 1)
     registry.build_index(addons, True)
     monkeypatch.setattr(registry, "MAX_INDEX_BYTES", size)
+    assert registry.build_index(addons, True)["addons"] == []
+    empty = len(registry.index_json(registry.build_index(addons, False)).encode("utf-8"))
+    monkeypatch.setattr(registry, "MAX_INDEX_BYTES", empty)
     with pytest.raises(registry.IndexTooLarge) as e:
-        registry.build_index(addons, True)
-    assert isinstance(e.value, ValueError) and str(size) in str(e.value)
+        registry.build_index(addons, False)
+    assert isinstance(e.value, ValueError) and str(empty) in str(e.value)
 
 
 def test_build_index_rejects_hostile_records(gh, addons):
@@ -429,8 +564,11 @@ def test_build_index_rejects_hostile_records(gh, addons):
     bad["current"]["changelog"] = "\x01" * (registry.MAX_INDEX_BYTES // 6 + 1)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(bad, f)
-    with pytest.raises(registry.IndexTooLarge):
-        registry.build_index(addons, True)
+    assert registry.build_index(addons, True)["addons"] == []
+    bad["current"]["changelog"] = "\ud800"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(bad, f)
+    assert registry.build_index(addons, True)["addons"] == []
 
 
 def test_id_leading_dot_rejected(gh, addons):

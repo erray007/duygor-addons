@@ -115,11 +115,12 @@ def test_cli_build_index(env, capsys):
     assert cli.main(["build-index", "--out", str(out), "--addons", addons, "--config", str(config)]) == 0
     first = out.read_bytes()
     index = json.loads(first)
-    assert index["storeEnabled"] is False and [a["id"] for a in index["addons"]] == ["demo"]
+    assert index["storeEnabled"] is False and index["addons"] == []
     assert cli.main(["build-index", "--out", str(out), "--addons", addons, "--config", str(config)]) == 0
     assert out.read_bytes() == first
     assert cli.main(["build-index", "--out", str(out), "--addons", addons, "--config", str(tmp / "missing.json")]) == 0
-    assert json.loads(out.read_bytes())["storeEnabled"] is True
+    index = json.loads(out.read_bytes())
+    assert index["storeEnabled"] is True and [a["id"] for a in index["addons"]] == ["demo"]
     config.write_text('{"storeEnabled": "no"}', encoding="utf-8")
     assert cli.main(["build-index", "--out", str(out), "--addons", addons, "--config", str(config)]) != 0
 
