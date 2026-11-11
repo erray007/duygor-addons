@@ -16,6 +16,8 @@ import subprocess
 import sys
 import tempfile
 
+from text_safety import defuse_body
+
 COMMANDS = {"eklenti-gonder": "register", "eklenti-kaldir": "remove"}
 ERROR_MARKER = "<!-- duygor-registry-error -->"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -85,6 +87,7 @@ def handle(issue, command):
     comment = result.get("comment")
     if not isinstance(comment, str) or not comment.strip():
         raise ValueError("the CLI result has no comment")
+    comment = defuse_body(comment)
     cli("build-index", "--out", "site/index.json")
     subprocess.run(["bash", os.path.join(HERE, "commit_registry.sh")], check=True)
     comment_from_file(issue["number"], comment)

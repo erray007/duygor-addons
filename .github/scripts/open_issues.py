@@ -7,24 +7,11 @@ except the owner mention the registry puts on the first line of a body.
 
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
 
-_LEADING_MENTION = re.compile(r"@[A-Za-z0-9-]{1,39}\n\n")
-_ZERO_WIDTH_SPACE = "​"
-
-
-def defuse(text):
-    return text.replace("@", "@" + _ZERO_WIDTH_SPACE)
-
-
-def defuse_body(body):
-    match = _LEADING_MENTION.match(body)
-    if not match:
-        return defuse(body)
-    return match.group(0) + defuse(body[match.end():])
+from text_safety import defuse, defuse_body
 
 
 def main(scan_path):

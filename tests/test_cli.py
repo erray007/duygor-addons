@@ -143,3 +143,12 @@ def test_parse_body_as_github_renders_the_forms():
     assert cli.parse_remove(remove) == ("demo", None)
     unticked = submit.replace("- [X]", "- [ ]")
     assert cli.parse_submit(unticked)[0] is None
+
+
+def test_cli_register_twice_is_idempotent_success(env, capsys):
+    gh, addons, tmp_path = env
+    path = issue_file(tmp_path, submit_body())
+    first = run(capsys, ["register", "--issue-json", path, "--addons", addons], gh)
+    second = run(capsys, ["register", "--issue-json", path, "--addons", addons], gh)
+    assert first["ok"] and first["changed"]
+    assert second["ok"] and not second["changed"]

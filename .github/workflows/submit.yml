@@ -42,7 +42,7 @@ jobs:
         id: sweep
         run: python .github/scripts/sweep_issues.py
       - name: Tell the author the registry failed
-        if: failure()
+        if: failure() && steps.process.outcome == 'failure'
         run: python .github/scripts/process_issue.py fail "$NUMBER"
 
   pages:
