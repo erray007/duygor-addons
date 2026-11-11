@@ -1,0 +1,38 @@
+{
+  "checked_asset": null,
+  "current": {
+    "asset_id": 735294092,
+    "asset_updated_at": "2026-11-11T11:34:57Z",
+    "author": "Eray",
+    "changelog": "İlk mağaza sürümü.\n\nFirst store release.",
+    "descriptions": {
+      "en": "Expands abbreviations while reading, keeps a notification history, recognizes text on the screen and asks the AI about the screen",
+      "tr": "Okurken kısaltmaları açar, bildirim geçmişi tutar, ekrandaki yazıyı tanır ve ekran hakkında yapay zekâya sorar"
+    },
+    "languages": [
+      "en",
+      "tr"
+    ],
+    "min_version": 537,
+    "names": {
+      "en": "Reading Helper",
+      "tr": "Okuma Yardımcısı"
+    },
+    "published": "2026-11-11T11:34:58Z",
+    "sha256": "5e72941fa8dde101373d1aa083537eed69af492d3e9e6438db827292d54f9ffb",
+    "size": 5209,
+    "source_language": "en",
+    "url": "https://github.com/erray007/duygor-addon-okumayardimcisi/releases/download/v1.2/okumayardimcisi.dgp",
+    "version": "1.2"
+  },
+  "hidden_reason": null,
+  "id": "okumayardimcisi",
+  "owner_id": 161474134,
+  "owner_login": "erray007",
+  "registered_at": "2026-11-11T11:38:17Z",
+  "rejected_versions": [],
+  "removed": false,
+  "repo": "erray007/duygor-addon-okumayardimcisi",
+  "reported_asset_change": null,
+  "reported_owner_mismatch": null
+}
