@@ -1,0 +1,27 @@
+name: Eklenti kaldır / Remove an add-on
+description: Kendi eklentini mağazadan kaldır. / Remove your own add-on from the store.
+title: "Eklenti kaldır / Remove add-on"
+labels: ["eklenti-kaldir"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Yalnız eklentiyi ilk kaydeden hesap kaldırabilir.
+
+        Only the account that first registered the add-on can remove it.
+  - type: input
+    id: addon_id
+    attributes:
+      label: Eklenti kimliği (Add-on id)
+      description: Kaldırılacak eklentinin kimliği. / The id of the add-on to remove.
+      placeholder: ornek-eklenti
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Onay (Confirmation)
+      description: Göndermeden önce onaylayın. / Confirm before submitting.
+      options:
+        - label: Bu eklentiyi mağazadan kaldırmak istiyorum. / I want to remove this add-on from the store.
+          required: true

@@ -1,0 +1,27 @@
+name: Eklenti gönder / Submit an add-on
+description: DuyGör eklenti mağazasına eklenti kaydet. / Register an add-on in the DuyGör add-on store.
+title: "Eklenti gönder / Submit add-on"
+labels: ["eklenti-gonder"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Eklentinin GitHub Release sayfasının adresini yazın. Kayıt otomatik yapılır ve sonuç bu issue'ya yorum olarak yazılır.
+
+        Enter the address of your add-on's GitHub Release page. Registration is automatic and the result is posted as a comment on this issue.
+  - type: input
+    id: release_url
+    attributes:
+      label: Release adresi (Release URL)
+      description: Eklenti paketinin (.dgp) bulunduğu Release sayfası. / The Release page that holds the add-on package (.dgp).
+      placeholder: https://github.com/kullanici/duygor-addon-ornek/releases/tag/v1.0
+    validations:
+      required: true
+  - type: checkboxes
+    id: responsibility
+    attributes:
+      label: Sorumluluk (Responsibility)
+      description: Göndermeden önce onaylayın. / Confirm before submitting.
+      options:
+        - label: Eklentimin sorumluluğu bana aittir, bilerek zararlı kod içermez. / I am responsible for my add-on and it does not knowingly contain harmful code.
+          required: true

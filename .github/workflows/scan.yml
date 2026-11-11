@@ -1,0 +1,42 @@
+name: Scan
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: registry
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+      - name: Scan the registered add-ons
+        run: python -m duygor_registry.cli scan > "$RUNNER_TEMP/scan.json"
+      - name: Build the index
+        run: python -m duygor_registry.cli build-index --out site/index.json
+      - name: Commit and push
+        id: commit
+        run: bash .github/scripts/commit_registry.sh
+      - name: Publish the site
+        if: steps.commit.outputs.changed == 'true'
+        run: gh workflow run pages.yml --ref main
+      - name: Open the issues the scan asked for
+        run: python .github/scripts/open_issues.py "$RUNNER_TEMP/scan.json"

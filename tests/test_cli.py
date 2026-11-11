@@ -134,3 +134,12 @@ def test_cli_scan_survives_a_failing_record(env, capsys):
     gh.raising["alice/zzz"] = http.client.IncompleteRead(b"")
     issues = run(capsys, ["scan", "--addons", addons], gh)
     assert len(issues) == 1 and issues[0]["title"].startswith("demo 2.0")
+
+
+def test_parse_body_as_github_renders_the_forms():
+    submit = "### Release adresi (Release URL)\n\nhttps://github.com/alice/duygor-addon-demo/releases/tag/v1.0\n\n### Sorumluluk (Responsibility)\n\n- [X] Eklentimin sorumluluğu bana aittir, bilerek zararlı kod içermez. / I am responsible for my add-on and it does not knowingly contain harmful code.\n"
+    assert cli.parse_submit(submit) == ("https://github.com/alice/duygor-addon-demo/releases/tag/v1.0", None)
+    remove = "### Eklenti kimliği (Add-on id)\n\ndemo\n\n### Onay (Confirmation)\n\n- [X] Bu eklentiyi mağazadan kaldırmak istiyorum. / I want to remove this add-on from the store.\n"
+    assert cli.parse_remove(remove) == ("demo", None)
+    unticked = submit.replace("- [X]", "- [ ]")
+    assert cli.parse_submit(unticked)[0] is None
