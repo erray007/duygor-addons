@@ -121,8 +121,33 @@ def test_cli_build_index(env, capsys):
     assert cli.main(["build-index", "--out", str(out), "--addons", addons, "--config", str(tmp / "missing.json")]) == 0
     index = json.loads(out.read_bytes())
     assert index["storeEnabled"] is True and [a["id"] for a in index["addons"]] == ["demo"]
-    config.write_text('{"storeEnabled": "no"}', encoding="utf-8")
-    assert cli.main(["build-index", "--out", str(out), "--addons", addons, "--config", str(config)]) != 0
+    # The maintainer only edits config.json to close the store, so a malformed one closes it.
+    for text in ('{"storeEnabled": "no"}', "{storeEnabled: false", "[]", "\xff"):
+        out.write_text("stale", encoding="utf-8")
+        config.write_text(text, encoding="latin-1")
+        capsys.readouterr()
+        assert cli.main(["build-index", "--out", str(out), "--addons", addons, "--config", str(config)]) == 0
+        assert json.loads(out.read_bytes()) == {"schema": 1, "storeEnabled": False, "movedTo": None, "addons": []}, text
+        captured = capsys.readouterr()
+        assert "config.json" in captured.err and "store is closed" in captured.err and "::error" in captured.out
+
+
+def test_scan_workflow_deploys_after_failed_steps():
+    """The kill switch must not depend on the scan or on GitHub issues working."""
+    yaml = pytest.importorskip("yaml")
+    path = os.path.join(os.path.dirname(__file__), "..", ".github", "workflows", "scan.yml")
+    with open(path, encoding="utf-8") as f:
+        jobs = yaml.safe_load(f)["jobs"]
+    steps = {s.get("id"): s for s in jobs["scan"]["steps"] if s.get("id")}
+    assert "continue-on-error" not in steps["scan"] and "continue-on-error" not in steps["issues"]
+    drop = next(s for s in jobs["scan"]["steps"] if s.get("name") == "Drop the scan state after a failure")
+    assert "!cancelled()" in drop["if"] and "steps.scan.outcome == 'failure'" in drop["if"] and "steps.issues.outcome == 'failure'" in drop["if"]
+    assert "git reset --hard HEAD" in drop["run"]
+    assert steps["build"]["if"] == "${{ !cancelled() }}"
+    assert "!cancelled()" in steps["commit"]["if"] and "steps.build.outcome == 'success'" in steps["commit"]["if"]
+    order = [s.get("id") for s in jobs["scan"]["steps"]]
+    assert order.index("issues") < order.index("build") < order.index("commit")
+    assert "!cancelled()" in jobs["pages"]["if"] and "needs.scan.outputs.changed == 'true'" in jobs["pages"]["if"]
 
 
 def test_cli_build_index_too_large_keeps_old_file(env, capsys, monkeypatch):

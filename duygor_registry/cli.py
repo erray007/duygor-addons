@@ -128,17 +128,28 @@ def _client(gh):
 
 
 def _store_enabled(path):
+    """storeEnabled from the config; a missing file means true. The maintainer only edits the file to
+    close the store, so anything unreadable or malformed fails closed, reported on stderr and as a
+    GitHub Actions error annotation."""
     try:
         with open(path, encoding="utf-8") as f:
             config = json.load(f)
     except FileNotFoundError:
         return True
-    if not isinstance(config, dict):
-        raise ValueError(path + " must hold a JSON object")
-    enabled = config.get("storeEnabled", True)
-    if not isinstance(enabled, bool):
-        raise ValueError(path + ": storeEnabled must be true or false")
-    return enabled
+    except (OSError, ValueError) as e:
+        problem = "cannot be read (%s: %s)" % (type(e).__name__, e)
+    else:
+        if not isinstance(config, dict):
+            problem = "does not hold a JSON object"
+        else:
+            enabled = config.get("storeEnabled", True)
+            if isinstance(enabled, bool):
+                return enabled
+            problem = "has a storeEnabled that is not true or false"
+    message = "%s %s, so the store is closed (storeEnabled false) until it is fixed" % (path, problem)
+    sys.stderr.write("ERROR: %s\n" % message)
+    print("::error title=config.json::" + " ".join(message.split()))
+    return False
 
 
 def _write_if_changed(path, text):

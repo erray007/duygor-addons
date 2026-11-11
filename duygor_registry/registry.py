@@ -14,6 +14,7 @@ import re
 import sys
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from . import package, version
 from .github import DownloadTooLarge, GitHubError, parse_release_url
@@ -116,8 +117,12 @@ def save(addons_dir, record):
     return True
 
 
-def records(addons_dir):
-    """Every record, in file name order; a record whose id does not match its file name is an error."""
+def records(addons_dir, skip_corrupt=False):
+    """Every record, in file name order.
+
+    An unreadable record, or one whose id does not match its file name, raises ValueError; with
+    skip_corrupt it is reported on stderr and left out instead.
+    """
     try:
         names = sorted(os.listdir(addons_dir))
     except FileNotFoundError:
@@ -126,10 +131,18 @@ def records(addons_dir):
         if not name.endswith(RECORD_EXTENSION):
             continue
         addon_id = name[: -len(RECORD_EXTENSION)]
-        record = load(addons_dir, addon_id)
-        if not isinstance(record, dict) or record.get("id") != addon_id:
-            raise ValueError("Corrupt registry record: " + name)
-        yield record
+        try:
+            record = load(addons_dir, addon_id)
+        except (OSError, ValueError) as e:
+            problem = "%s: %s" % (type(e).__name__, e)
+        else:
+            if isinstance(record, dict) and record.get("id") == addon_id:
+                yield record
+                continue
+            problem = "not an object with the id " + addon_id
+        if not skip_corrupt:
+            raise ValueError("Corrupt registry record: %s (%s)" % (name, problem))
+        sys.stderr.write("skipped %s: corrupt registry record (%s)\n" % (name, problem))
 
 
 # Messages
@@ -362,8 +375,13 @@ def _scan_record(gh, record, release, explicit=False, info=None, repo=None):
     return events
 
 
+def _utc_now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _new_record(info, asset, release, repo, full_name):
-    return {"id": info.id, "owner_id": repo.owner_id, "owner_login": repo.owner_login, "repo": full_name, "removed": False, "hidden_reason": None, "current": _current(info, asset, release), "rejected_versions": [], "reported_asset_change": None, "reported_owner_mismatch": None, "checked_asset": None}
+    # registered_at is set once here and never changed: it ranks established add-ons in build_index.
+    return {"id": info.id, "registered_at": _utc_now(), "owner_id": repo.owner_id, "owner_login": repo.owner_login, "repo": full_name, "removed": False, "hidden_reason": None, "current": _current(info, asset, release), "rejected_versions": [], "reported_asset_change": None, "reported_owner_mismatch": None, "checked_asset": None}
 
 
 def _scan_one(gh, record):
@@ -550,24 +568,31 @@ def _entry_size(entry):
     return len(_compact(entry).encode("utf-8"))
 
 
+def _since(record, entry):
+    """When the add-on joined the store: registered_at, or for older records their release time; None if unknown."""
+    for value in (record.get("registered_at"), entry["published"]):
+        if isinstance(value, str):
+            return value
+    return None
+
+
 def _keep_order(item):
-    """Established add-ons first: by publication time, then id; an entry without a usable time comes last."""
-    published = item[0]["published"]
-    dated = isinstance(published, str)
-    return (not dated, published if dated else "", item[0]["id"])
+    """Established add-ons first: by registration time, then id; an add-on without a usable time comes last."""
+    entry, _, since = item
+    return (since is None, since or "", entry["id"])
 
 
 def build_index(addons_dir, store_enabled):
     """The index.json document the app reads; removed and hidden add-ons are left out.
 
-    With the store disabled no record is read at all, so the kill switch always deploys. Entries over
-    MAX_ENTRY_BYTES are skipped; when the rest would reach MAX_INDEX_BYTES the newest are dropped until
-    it fits. Each skipped or dropped id is reported on stderr.
+    With the store disabled no record is read at all, so the kill switch always deploys. Corrupt record
+    files and entries over MAX_ENTRY_BYTES are skipped; when the rest would reach MAX_INDEX_BYTES the most
+    recently registered add-ons are dropped until it fits. Each skipped or dropped one is reported on stderr.
     """
     index = {"schema": INDEX_SCHEMA, "storeEnabled": bool(store_enabled), "movedTo": None, "addons": []}
     if store_enabled:
         kept = []
-        for record in records(addons_dir):
+        for record in records(addons_dir, skip_corrupt=True):
             if record.get("removed") or record.get("hidden_reason"):
                 continue
             entry = _entry(record)
@@ -581,15 +606,15 @@ def build_index(addons_dir, store_enabled):
             if size > MAX_ENTRY_BYTES:
                 sys.stderr.write("skipped %s: index entry is %d bytes (limit %d)\n" % (entry["id"], size, MAX_ENTRY_BYTES))
                 continue
-            kept.append((entry, size))
+            kept.append((entry, size, _since(record, entry)))
         kept.sort(key=_keep_order)
         # The entries sit between the brackets of the empty list, separated by commas.
-        total = len(index_json(index).encode("utf-8")) + sum(size for _, size in kept) + max(len(kept) - 1, 0)
+        total = len(index_json(index).encode("utf-8")) + sum(item[1] for item in kept) + max(len(kept) - 1, 0)
         while kept and total >= MAX_INDEX_BYTES:
-            entry, size = kept.pop()
+            entry, size, _ = kept.pop()
             total -= size + (1 if kept else 0)
-            sys.stderr.write("dropped %s: index.json would reach %d bytes (newest add-ons go first)\n" % (entry["id"], MAX_INDEX_BYTES))
-        index["addons"] = sorted((entry for entry, _ in kept), key=lambda e: e["id"])
+            sys.stderr.write("dropped %s: index.json would reach %d bytes (most recently registered add-ons go first)\n" % (entry["id"], MAX_INDEX_BYTES))
+        index["addons"] = sorted((item[0] for item in kept), key=lambda e: e["id"])
     # The app refuses bodies over 4 MB, which would also hide the kill switch, so an oversized index is never built.
     size = len(index_json(index).encode("utf-8"))
     if size >= MAX_INDEX_BYTES:

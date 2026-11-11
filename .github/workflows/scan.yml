@@ -30,15 +30,28 @@ jobs:
         with:
           python-version: "3.11"
       - name: Scan the registered add-ons
+        id: scan
         run: python -m duygor_registry.cli scan > "$RUNNER_TEMP/scan.json"
       # Issues are opened BEFORE the dedupe state is committed: if opening fails, the job stops,
       # the state is not pushed and the next scan raises the same issues again.
       - name: Open the issues the scan asked for
+        id: issues
         run: python .github/scripts/open_issues.py "$RUNNER_TEMP/scan.json"
+      # The index (and with it the kill switch) still deploys after a failed scan or issue step,
+      # but from main's records only: the scan's state is dropped so no unopened issue is lost.
+      # The job still ends red.
+      - name: Drop the scan state after a failure
+        if: ${{ !cancelled() && (steps.scan.outcome == 'failure' || steps.issues.outcome == 'failure') }}
+        run: |
+          git reset --hard HEAD
+          git clean -fd addons site
       - name: Build the index
+        id: build
+        if: ${{ !cancelled() }}
         run: python -m duygor_registry.cli build-index --out site/index.json
       - name: Commit and push
         id: commit
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: bash .github/scripts/commit_registry.sh
       - name: Sweep open form issues that lost their run
         id: sweep
@@ -46,7 +59,8 @@ jobs:
 
   pages:
     needs: scan
-    if: always() && needs.scan.outputs.changed == 'true'
+    # Deploys whenever something was pushed, even if a later step of the scan job failed.
+    if: ${{ !cancelled() && needs.scan.outputs.changed == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

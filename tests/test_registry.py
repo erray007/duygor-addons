@@ -405,8 +405,62 @@ def test_kill_switch_ignores_records(gh, addons, monkeypatch):
     monkeypatch.setattr(registry, "MAX_INDEX_BYTES", 80)
     index = registry.build_index(addons, False)
     assert index == {"schema": 1, "storeEnabled": False, "movedTo": None, "addons": []}
+
+
+def test_build_index_skips_corrupt_records(gh, addons, capsys):
+    register_demo(gh, addons)
+    with open(os.path.join(addons, "broken.json"), "w", encoding="utf-8") as f:
+        f.write("{not json")
+    with open(os.path.join(addons, "binary.json"), "wb") as f:
+        f.write(b"\xff\xfe\x00")
+    with open(os.path.join(addons, "list.json"), "w", encoding="utf-8") as f:
+        f.write("[]")
+    other = record(addons)
+    with open(os.path.join(addons, "mismatch.json"), "w", encoding="utf-8") as f:
+        json.dump(other, f)
+    os.mkdir(os.path.join(addons, "folder.json"))
+    assert [a["id"] for a in registry.build_index(addons, True)["addons"]] == ["demo"]
+    err = capsys.readouterr().err
+    assert all(name in err for name in ("broken.json", "binary.json", "list.json", "mismatch.json", "folder.json"))
     with pytest.raises(ValueError):
-        registry.build_index(addons, True)
+        list(registry.records(addons))
+
+
+def test_register_sets_registered_at_once(gh, addons, monkeypatch):
+    monkeypatch.setattr(registry, "_utc_now", lambda: "2026-01-01T00:00:00Z")
+    register_demo(gh, addons)
+    assert record(addons)["registered_at"] == "2026-01-01T00:00:00Z"
+    monkeypatch.setattr(registry, "_utc_now", lambda: "2027-01-01T00:00:00Z")
+    register_demo(gh, addons, "1.1")
+    gh.publish(REPO, "v1.2", package(ver="1.2"))
+    registry.scan(gh, addons)
+    r = record(addons)
+    assert r["current"]["version"] == "1.2" and r["registered_at"] == "2026-01-01T00:00:00Z"
+
+
+def test_build_index_drops_newly_registered_not_updated(gh, addons, monkeypatch):
+    monkeypatch.setattr(registry, "_utc_now", lambda: "2026-01-01T00:00:00Z")
+    register_demo(gh, addons)
+    gh.add_repo("alice/neww", ALICE)
+    monkeypatch.setattr(registry, "_utc_now", lambda: "2026-06-01T00:00:00Z")
+    neww = gh.publish("alice/neww", "v1.0", package("neww"), name="neww.dgp")
+    assert registry.register(gh, addons, gh.url_of(neww), ALICE, "alice").ok
+    # The established add-on now has the newest release of all.
+    gh.publish(REPO, "v1.1", package(ver="1.1"))
+    registry.scan(gh, addons)
+    assert record(addons)["current"]["published"] > record(addons, "neww")["current"]["published"]
+    full = len(registry.index_json(registry.build_index(addons, True)).encode("utf-8"))
+    monkeypatch.setattr(registry, "MAX_INDEX_BYTES", full - 1)
+    assert [a["id"] for a in registry.build_index(addons, True)["addons"]] == ["demo"]
+    # Records from before registered_at existed fall back to their release time.
+    legacy = record(addons)
+    del legacy["registered_at"]
+    legacy["current"]["published"] = "2026-03-01T00:00:00Z"
+    write_record(addons, legacy)
+    assert [a["id"] for a in registry.build_index(addons, True)["addons"]] == ["demo"]
+    legacy["current"]["published"] = "2026-09-01T00:00:00Z"
+    write_record(addons, legacy)
+    assert [a["id"] for a in registry.build_index(addons, True)["addons"]] == ["neww"]
 
 
 def entry_size(entry):
@@ -445,7 +499,9 @@ def test_build_index_drops_newest_over_cap(gh, addons, capsys, monkeypatch):
     for i, addon_id in enumerate(["aold", "bmid", "cnew", "dnew"]):
         r = json.loads(json.dumps(template))
         r["id"] = addon_id
-        r["current"]["published"] = "2026-0%d-01T00:00:00Z" % (i + 2)
+        r["registered_at"] = "2026-0%d-01T00:00:00Z" % (i + 2)
+        # Release times run the other way: only registration order decides.
+        r["current"]["published"] = "2026-0%d-01T00:00:00Z" % (9 - i)
         write_record(addons, r)
     os.remove(os.path.join(addons, "demo.json"))
     full = registry.index_json(registry.build_index(addons, True))
@@ -468,7 +524,7 @@ def test_build_index_survives_crafted_entries(gh, addons):
     for i in range(40):
         r = json.loads(json.dumps(template))
         r["id"] = "spam%02d" % i
-        r["current"]["published"] = "2027-01-01T00:%02d:00Z" % i
+        r["registered_at"] = "2027-01-01T00:%02d:00Z" % i
         r["current"]["changelog"] = worst[: (registry.MAX_ENTRY_BYTES - 1000) // 6]
         write_record(addons, r)
     index = registry.build_index(addons, True)
