@@ -1,5 +1,7 @@
 """First-submission author approval: pending records, maintainer decisions, and the sweep's selection."""
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -257,6 +259,34 @@ def test_malformed_trust_state_stops_the_cli(env, capsys):
     assert os.listdir(env.tmp / "addons") == []
 
 
+def test_untrusted_author_holds_at_most_max_pending(env, capsys):
+    for n in range(registry.MAX_PENDING + 1):
+        repo = "alice/a%d" % n
+        env.gh.add_repo(repo, ALICE)
+        result = submit(env, capsys, env.gh.url_of(env.gh.publish(repo, "v1", package("a%d" % n))))
+        if n < registry.MAX_PENDING:
+            assert result["pending"] is True
+    assert result["ok"] is False and "at most 3 add-ons awaiting approval" in result["message_en"] and "en fazla 3" in result["message_tr"]
+    assert stored(env, "a3") is None
+    # Resubmitting one already pending is not a new reservation.
+    assert submit(env, capsys, env.gh.url_of(env.gh.releases["alice/a0"][0]))["pending"] is True
+    decide(env, capsys, "approve", MAINTAINER, env.gh.url_of(env.gh.releases["alice/a0"][0]))
+    assert submit(env, capsys, env.gh.url_of(env.gh.releases["alice/a3"][0]))["ok"] is True
+    assert index(env) == {"a0": "1.0", "a1": "1.0", "a2": "1.0", "a3": "1.0"}
+
+
+def test_pending_record_remembers_its_issues(env, capsys):
+    submit(env, capsys)
+    path = env.tmp / "issue.json"
+    for number in (9, 8, 9):
+        path.write_text(json.dumps({"issue_number": number, "author_id": ALICE, "author_login": "alice", "body": submit_body(env.url)}), encoding="utf-8")
+        run(capsys, ["register", "--issue-json", str(path)], env.gh)
+    assert stored(env)["pending_issues"] == [7, 8, 9]
+    result = decide(env, capsys, "approve", MAINTAINER)
+    assert [r["number"] for r in result["related"]] == [8, 9] and all("is published" in r["comment"] for r in result["related"])
+    assert "pending_issues" not in stored(env) and "status" not in stored(env)
+
+
 def labelled(*labels, state="open", user_type="User", pr=False):
     issue = {"number": 1, "state": state, "user": {"id": ALICE, "login": "alice", "type": user_type}, "labels": [{"name": n} for n in labels]}
     if pr:
@@ -269,44 +299,191 @@ def test_sweep_selection():
     assert process_issue.action_for(labelled("eklenti-kaldir")) == "remove"
     # Awaiting approval: never resubmitted.
     assert process_issue.action_for(labelled("eklenti-gonder", "onay-bekliyor")) is None
-    assert process_issue.command_for(labelled("eklenti-gonder", "onaylandi")) is None
+    # A decision label acts only on an issue awaiting approval; an unprocessed form is registered first.
+    assert process_issue.decision_for(labelled("eklenti-gonder", "onaylandi")) is None
+    assert process_issue.action_for(labelled("eklenti-gonder", "onaylandi")) == "register"
     assert process_issue.action_for(labelled("eklenti-gonder", "onay-bekliyor", "onaylandi")) == "approve"
     assert process_issue.action_for(labelled("eklenti-gonder", "onay-bekliyor", "reddedildi")) == "reject"
-    assert process_issue.action_for(labelled("eklenti-gonder", "onaylandi", "reddedildi")) is None
-    assert process_issue.action_for(labelled("eklenti-kaldir", "onaylandi")) is None
-    assert process_issue.action_for(labelled("onaylandi")) is None
-    for issue in (labelled("eklenti-gonder", "onaylandi", state="closed"), labelled("eklenti-gonder", "onaylandi", user_type="Bot"), labelled("eklenti-gonder", "onaylandi", pr=True)):
+    assert process_issue.action_for(labelled("eklenti-gonder", "onay-bekliyor", "onaylandi", "reddedildi")) is None
+    assert process_issue.decision_for(labelled("eklenti-kaldir", "onay-bekliyor", "onaylandi")) is None
+    assert process_issue.action_for(labelled("onay-bekliyor", "onaylandi")) is None
+    for issue in (labelled("eklenti-gonder", "onay-bekliyor", "onaylandi", state="closed"), labelled("eklenti-gonder", "onay-bekliyor", "onaylandi", user_type="Bot"), labelled("eklenti-gonder", "onay-bekliyor", "onaylandi", pr=True)):
         assert process_issue.action_for(issue) is None
 
 
+class Hub:
+    """The GitHub side of the workflow scripts (issues, labels, comments, events); the CLI runs in-process on env."""
+
+    def __init__(self, env, monkeypatch):
+        self.env = env
+        self.issues = {}
+        self.comments = {}
+        self.events = {}
+        self.log = []
+        monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+        monkeypatch.setattr(process_issue, "gh", self.gh)
+        monkeypatch.setattr(process_issue, "cli", self.cli)
+        monkeypatch.setattr(process_issue, "comment_from_file", self.comment)
+        monkeypatch.setattr(process_issue, "push_registry", lambda: self.log.append(("push",)))
+        monkeypatch.setattr(process_issue, "reset_tree", lambda: self.log.append(("reset",)))
+
+    def open(self, number, body, *labels, author=ALICE, login="alice"):
+        self.issues[number] = {"number": number, "state": "open", "user": {"id": author, "login": login, "type": "User"}, "body": body, "labels": []}
+        self.events[number] = []
+        for name in labels:
+            self.label(number, name, author)
+        return self.issues[number]
+
+    def names(self, number):
+        return {label["name"] for label in self.issues[number]["labels"]}
+
+    def label(self, number, name, actor, actor_type="User"):
+        if name not in self.names(number):
+            self.issues[number]["labels"].append({"name": name})
+        self.events[number].append(["labeled", name, actor, actor_type])
+
+    def set_state(self, number, state):
+        self.issues[number]["state"] = state
+        self.events[number].append(["closed" if state == "closed" else "reopened", None, MAINTAINER, "User"])
+
+    def comment(self, number, text):
+        self.comments.setdefault(number, []).append(text)
+        self.log.append(("comment", number))
+
+    def cli(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            assert cli.main(list(args), gh=self.env.gh) == 0
+        return SimpleNamespace(stdout=out.getvalue())
+
+    def gh(self, *args, check=True):
+        done = SimpleNamespace(stdout="", stderr="", returncode=0)
+        if args[0] == "label":
+            return done
+        if args[0] == "issue":
+            number = int(args[2])
+            if args[1] == "edit":
+                self.label(number, args[-1], 0, "Bot")
+                self.log.append(("label", number, args[-1]))
+            elif args[1] == "close":
+                self.set_state(number, "closed")
+                self.log.append(("close", number))
+            return done
+        if args[1] == "--method":
+            parts = args[3].split("/")
+            number, name = int(parts[4]), parts[6]
+            if name not in self.names(number):
+                return SimpleNamespace(stdout="", stderr="gh: Label does not exist (HTTP 404)", returncode=1)
+            self.issues[number]["labels"] = [label for label in self.issues[number]["labels"] if label["name"] != name]
+            self.events[number].append(["unlabeled", name, 0, "Bot"])
+            self.log.append(("unlabel", number, name))
+            return done
+        parts = (args[2] if args[1] == "--paginate" else args[1]).split("?")[0].split("/")
+        number = int(parts[4])
+        if parts[-1] == "events":
+            done.stdout = "\n".join(json.dumps(e) for e in self.events[number])
+        elif parts[-1] == "comments":
+            done.stdout = "\n".join(self.comments.get(number, []))
+        else:
+            done.stdout = json.dumps(self.issues[number])
+        return done
+
+
 @pytest.fixture
-def scripts(monkeypatch):
+def hub(env, monkeypatch):
+    return Hub(env, monkeypatch)
+
+
+def review(hub, number, command, sender=None):
     import review_issue
-    calls = []
-    monkeypatch.setenv("GITHUB_REPOSITORY", "erray007/duygor-addons")
-    monkeypatch.setattr(process_issue, "gh", lambda *a, check=True: calls.append(("gh",) + a) or SimpleNamespace(stdout="", stderr="", returncode=0))
-    monkeypatch.setattr(process_issue, "comment_from_file", lambda n, text: calls.append(("comment", n, text)))
-    monkeypatch.setattr(process_issue, "push_registry", lambda: calls.append(("push",)))
-    return review_issue, calls
+    return review_issue.review(hub.issues[number], command, sender, None if sender is None else "User")
 
 
-def test_review_script_denies_non_maintainers_and_applies_maintainer_decisions(scripts, monkeypatch):
-    review_issue, calls = scripts
-    monkeypatch.setattr(process_issue, "run_cli", lambda command, issue, *extra: {"authorized": False, "comment": "only maintainers"})
-    assert review_issue.review(labelled("eklenti-gonder", "onay-bekliyor", "onaylandi"), "approve", BOB, "User") == 0
-    assert ("push",) not in calls and any(c[0] == "gh" and "DELETE" in c and c[-1].endswith("/labels/onaylandi") for c in calls)
-    assert [c for c in calls if c[0] == "comment"][0][2].startswith(review_issue.DENIED_MARKER)
-    calls.clear()
-    monkeypatch.setattr(process_issue, "run_cli", lambda command, issue, *extra: {"authorized": True, "comment": "approved", "extra": extra})
-    assert review_issue.review(labelled("eklenti-gonder", "onay-bekliyor", "reddedildi"), "reject", MAINTAINER, "User") == 0
-    kinds = [c[0] if c[0] != "gh" else c[1] for c in calls]
-    assert kinds == ["push", "comment", "api", "issue"] and calls[2][-1].endswith("/labels/onay-bekliyor") and calls[3][1:3] == ("issue", "close")
-    calls.clear()
-    # Bots, a label the issue no longer has, and a mismatched command are ignored.
-    assert review_issue.review(labelled("eklenti-gonder", "onaylandi"), "approve", MAINTAINER, "Bot") == 0
-    assert review_issue.review(labelled("eklenti-gonder"), "approve", MAINTAINER, "User") == 0
-    assert review_issue.review(labelled("eklenti-gonder", "onaylandi"), "reject", MAINTAINER, "User") == 0
-    assert calls == []
+def test_script_labels_pending_before_commenting_once_per_version(env, hub):
+    hub.open(5, submit_body(env.url), "eklenti-gonder")
+    assert process_issue.process(hub.issues[5]) == 0
+    assert hub.log.index(("label", 5, "onay-bekliyor")) < hub.log.index(("comment", 5))
+    assert len(hub.comments[5]) == 1 and hub.comments[5][0].startswith("<!-- duygor-pending:demo:1.0 -->") and "awaiting approval" in hub.comments[5][0]
+    assert hub.issues[5]["state"] == "open" and process_issue.action_for(hub.issues[5]) is None
+    # A run that lost the label after commenting labels it again but does not repeat the comment.
+    hub.issues[5]["labels"] = [{"name": "eklenti-gonder"}]
+    assert process_issue.process(hub.issues[5]) == 0
+    assert len(hub.comments[5]) == 1 and "onay-bekliyor" in hub.names(5)
+
+
+def test_script_approval_closes_every_issue_of_the_author(env, hub):
+    hub.open(5, submit_body(env.url), "eklenti-gonder")
+    process_issue.process(hub.issues[5])
+    env.gh.add_repo("alice/other", ALICE)
+    other = env.gh.url_of(env.gh.publish("alice/other", "v1", package("other", "1.0")))
+    hub.open(6, submit_body(other), "eklenti-gonder")
+    process_issue.process(hub.issues[6])
+    hub.label(5, "onaylandi", MAINTAINER)
+    hub.label(6, "onaylandi", MAINTAINER)
+    stale = json.loads(json.dumps(hub.issues[6]))
+    assert review(hub, 5, "approve", MAINTAINER) == 0
+    # The sweep's snapshot of issue 6 is stale; the live copy is closed, so it is not decided twice.
+    import sweep_issues
+    comments = len(hub.comments[6])
+    assert sweep_issues.handle(stale) == 0 and len(hub.comments[6]) == comments
+    for number in (5, 6):
+        assert hub.issues[number]["state"] == "closed" and hub.names(number) == {"eklenti-gonder"}
+        assert "is published" in hub.comments[number][-1] and "approved" in hub.comments[number][-1]
+    assert index(env) == {"demo": "1.0", "other": "1.0"} and trusted_ids() == [ALICE]
+
+
+def test_script_stale_decision_never_replays_on_a_reopened_issue(env, hub):
+    hub.open(5, submit_body(env.url), "eklenti-gonder")
+    process_issue.process(hub.issues[5])
+    hub.label(5, "onaylandi", MAINTAINER)
+    # Closed and reopened (say by its author, after editing the body) with the old label still on it.
+    hub.set_state(5, "closed")
+    hub.set_state(5, "reopened")
+    hub.issues[5]["state"] = "open"
+    assert process_issue.action_for(hub.issues[5]) == "approve"
+    assert review(hub, 5, "approve") == 0
+    assert stored(env)["status"] == registry.STATUS_PENDING and trusted_ids() == [] and hub.issues[5]["state"] == "open"
+    # A label removed after it was added does not count either.
+    hub.label(5, "onaylandi", MAINTAINER)
+    hub.events[5].append(["unlabeled", "onaylandi", MAINTAINER, "User"])
+    assert review(hub, 5, "approve") == 0 and trusted_ids() == []
+    # A fresh label by the maintainer does.
+    hub.label(5, "onaylandi", MAINTAINER)
+    assert review(hub, 5, "approve") == 0 and trusted_ids() == [ALICE] and hub.issues[5]["state"] == "closed"
+
+
+def test_script_event_sender_must_be_the_labeler(env, hub):
+    hub.open(5, submit_body(env.url), "eklenti-gonder")
+    process_issue.process(hub.issues[5])
+    hub.label(5, "onaylandi", BOB)
+    assert review(hub, 5, "approve", MAINTAINER) == 0
+    assert stored(env)["status"] == registry.STATUS_PENDING and "onaylandi" in hub.names(5) and trusted_ids() == []
+
+
+def test_script_removes_a_non_maintainer_label_before_the_consistency_check(env, hub):
+    hub.open(5, submit_body(env.url), "eklenti-gonder")
+    process_issue.process(hub.issues[5])
+    hub.label(5, "reddedildi", MAINTAINER)
+    for _ in range(2):
+        hub.label(5, "onaylandi", BOB)
+        assert review(hub, 5, "approve", BOB) == 0
+        assert "onaylandi" not in hub.names(5)
+    denials = [c for c in hub.comments[5] if c.startswith("<!-- duygor-review-denied -->")]
+    assert len(denials) == 1 and "Only the registry maintainers" in denials[0]
+    assert hub.log.count(("push",)) == 1 and stored(env)["status"] == registry.STATUS_PENDING
+    assert review(hub, 5, "reject", MAINTAINER) == 0
+    assert stored(env) is None and hub.issues[5]["state"] == "closed" and hub.names(5) == {"eklenti-gonder"}
+
+
+def test_script_withdrawal_closes_the_submit_issue(env, hub):
+    hub.open(5, submit_body(env.url), "eklenti-gonder")
+    process_issue.process(hub.issues[5])
+    hub.open(9, remove_body("demo"), "eklenti-kaldir")
+    assert process_issue.process(hub.issues[9]) == 0
+    assert stored(env) is None
+    for number in (9, 5):
+        assert hub.issues[number]["state"] == "closed" and "withdrawn" in hub.comments[number][-1]
+    assert "onay-bekliyor" not in hub.names(5)
 
 
 def _workflow(name):

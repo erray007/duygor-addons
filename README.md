@@ -18,11 +18,13 @@ rules, so the two must stay identical.
 - `duygor_registry.cli`: what the workflows run:
   - `register --issue-json <path>` / `remove --issue-json <path>`: the file holds
     `{"issue_number", "author_id", "author_login", "body"}`; prints
-    `{ok, message_tr, message_en, changed, comment}`.
-    `pending` is true when the submission was reserved and awaits approval (see below).
+    `{ok, message_tr, message_en, changed, pending, addon_id, version, related, comment}`.
+    `pending` is true when the submission was reserved and awaits approval (see below); `related`
+    (`[{number, comment}]`) lists other issues to answer and close.
   - `approve --issue-json <path> --sender-id <id>` / `reject ...`: a maintainer's decision on a
     submit issue; prints the same fields plus `authorized` (false, with nothing changed, when the
     sender is not in `config.json` → `maintainers`).
+  - `check-sender --sender-id <id> --decision approve|reject`: `{maintainer, comment}`.
   - `scan`: prints the issues to open as `[{title, body}]`.
   - `build-index --out site/index.json`: `storeEnabled` comes from `config.json`.
 - `duygor_registry.trust`: maintainers (`config.json` → `"maintainers"`, numeric GitHub user ids)
@@ -35,30 +37,46 @@ Approval is per author (numeric GitHub user id), not per add-on. Maintainers are
 
 - A submit form from an author who is neither a maintainer nor in `trusted_authors.json` runs every
   check; on success the record is saved with `"status": "pending"`, which reserves the id for that
-  author and repository but never publishes it. The issue gets a bilingual "awaiting approval"
-  comment, the label `onay-bekliyor`, and stays open. Submitting again while pending gives the same
-  answer and takes the newer package. A remove form withdraws a pending submission and frees the id.
+  author and repository but never publishes it, and remembers the submit issue (`pending_issues`).
+  The issue first gets the label `onay-bekliyor`, then one bilingual "awaiting approval" comment
+  per pending version (marker `<!-- duygor-pending:<id>:<version> -->`), and stays open.
+  Submitting again while pending gives the same answer and takes the newer package. An author who
+  is not approved yet holds at most 3 pending ids (`registry.MAX_PENDING`); a fourth new id is
+  rejected until a maintainer decides. A remove form withdraws a pending submission, frees the id
+  and answers and closes its submit issues.
+- Pending reservations do not expire yet: a pending id stays reserved until a maintainer decides or
+  the author withdraws it (or a maintainer deletes `addons/<id>.json`).
 - Pending records are never scanned, never hidden by the integrity check and never in index.json.
   Records without `status` (all records registered before this feature) are published.
-- **Approve:** a maintainer adds the label `onaylandi`. The Review workflow (`issues: labeled`)
-  passes the event's `sender.id` to `cli approve`; the author joins `trusted_authors.json` and the
-  pending add-on is published from its repository's latest release, checked again now. The issue is
-  closed and `onay-bekliyor` removed. If that release fails the checks, the author stays approved,
-  the record stays pending and the author's next form publishes it. With nothing pending, the form
-  itself is handled as a trusted submission.
+- **Approve:** a maintainer adds the label `onaylandi`. The author joins `trusted_authors.json` and
+  every pending add-on of the author is published from its repository's latest release at approval
+  time (not the release named in the form), checked again now. The decided issue and every other
+  submit issue of a published record are answered and closed. If a release fails the checks, the
+  author stays approved, that record stays pending (its issues open) and the author's next form
+  publishes it. With nothing pending, the form itself is handled as a trusted submission.
 - **Reject:** a maintainer adds `reddedildi`; the pending record is deleted (the id is free for
-  anyone) and the issue closed. A published record is never touched.
-- A decision label from anyone else is removed again, with one comment per issue saying that only
-  maintainers can decide. Labels added by bots are ignored.
+  anyone) and its issues closed. A published record is never touched.
+- Every finished decision closes the issue and removes `onay-bekliyor`, `onaylandi` and
+  `reddedildi`, so no decision label is left on a closed issue.
+- Who decided is read from the issue's events (`review_issue.labeler`): only an addition of the
+  label that still stands counts, i.e. the label was not removed and the issue was not closed or
+  reopened after it. An old decision therefore never replays on a reopened issue. In the Review
+  workflow (`issues: labeled`) that account must also be the event's `sender`.
+- That account's maintainer status (`cli check-sender`, `config.json` → `maintainers`) is checked
+  before anything else about the issue: a decision label from anyone else is removed again, with
+  one comment per issue saying that only maintainers can decide, so it can never block a
+  maintainer's label. `cli approve`/`reject` check the sender again. Labels added by bots are ignored.
+- A maintainer's label acts only on an issue awaiting approval (`onay-bekliyor`) with exactly one
+  decision label. On a form that was not processed yet, the submission is registered first; once it
+  is pending, the sweep applies the label.
 - From then on the author's new releases (hourly scan) and new add-ons (submit form) publish
   automatically.
-- The sweep never resubmits an `onay-bekliyor` issue. An open submit issue that carries a decision
-  label (its Review run was lost) is handled by the sweep with the account that last added that
-  label, read from the issue's events, and the same maintainer check. If a decision still seems
-  stuck, removing and re-adding the label starts a new Review run.
+- The sweep never resubmits an `onay-bekliyor` issue. It applies a decision label whose Review run
+  was lost, with the same checks. If a decision still seems stuck, removing and re-adding the
+  label starts a new Review run.
 
-Labels the repository needs: `eklenti-gonder`, `eklenti-kaldir` (forms), `onay-bekliyor`,
-`onaylandi`, `reddedildi` (approval).
+Labels: `eklenti-gonder`, `eklenti-kaldir` (forms), `onay-bekliyor`, `onaylandi`, `reddedildi`
+(approval). Every job creates or corrects them (`gh label create --force`) before it adds any.
 
 Store limits on top of the install rules (`registry._inspect`): name at most 100 characters in
 every language, author at most 100, description at most 2000, at most 64 language files; such

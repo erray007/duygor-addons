@@ -41,6 +41,7 @@ jobs:
         run: python .github/scripts/review_issue.py
       - name: Sweep open form issues that lost their run
         id: sweep
+        if: ${{ !cancelled() }}
         run: python .github/scripts/sweep_issues.py
 
   pages:

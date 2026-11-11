@@ -8,8 +8,9 @@ Needs GH_TOKEN, GITHUB_TOKEN and GITHUB_REPOSITORY. Issue text is only ever data
 CLI through a JSON file and to `gh` through body files, never through a shell.
 Flow: run the CLI, rebuild the index, commit and push, then comment with the result and close
 the issue. Any failure leaves the issue open (the sweep retries it) after one generic comment.
-An unapproved author's first submission is the exception: it is labelled PENDING_LABEL and stays
-open until a maintainer adds one of DECISIONS (review_issue.py); the sweep never resubmits it.
+An unapproved author's first submission is the exception: it is labelled PENDING_LABEL (before the
+comment, which is posted once per pending version) and stays open until a maintainer adds one of
+DECISIONS (review_issue.py); the sweep never resubmits it.
 """
 
 import json
@@ -24,7 +25,16 @@ COMMANDS = {"eklenti-gonder": "register", "eklenti-kaldir": "remove"}
 SUBMIT_LABEL = "eklenti-gonder"
 PENDING_LABEL = "onay-bekliyor"
 DECISIONS = {"onaylandi": "approve", "reddedildi": "reject"}
+# Every label the workflows use, created (or corrected) at the start of each job: name -> (color, description).
+LABELS = {
+    "eklenti-gonder": ("0e8a16", "Eklenti gönderme formu / Add-on submission form"),
+    "eklenti-kaldir": ("b60205", "Eklenti kaldırma formu / Add-on removal form"),
+    PENDING_LABEL: ("fbca04", "Depo yöneticisinin onayını bekliyor / Awaiting maintainer approval"),
+    "onaylandi": ("1d76db", "Yazar onaylandı (yalnız depo yöneticisi) / Author approved (maintainers only)"),
+    "reddedildi": ("5319e7", "İlk gönderim reddedildi (yalnız depo yöneticisi) / First submission rejected (maintainers only)"),
+}
 ERROR_MARKER = "<!-- duygor-registry-error -->"
+PENDING_MARKER = "<!-- duygor-pending:%s:%s -->"
 HERE = os.path.dirname(os.path.abspath(__file__))
 ERROR_MESSAGE = os.path.join(HERE, "..", "messages", "registry-error.md")
 
@@ -35,6 +45,19 @@ def gh(*args, check=True):
 
 def repo():
     return os.environ["GITHUB_REPOSITORY"]
+
+
+def ensure_labels():
+    """Creates every label the workflows add, so adding one can never fail on a missing label."""
+    for name, (color, description) in LABELS.items():
+        gh("label", "create", name, "--repo", repo(), "--color", color, "--description", description, "--force")
+
+
+def remove_label(number, label):
+    """Removes the label from the issue; one that is already gone is fine."""
+    result = gh("api", "--method", "DELETE", "repos/%s/issues/%s/labels/%s" % (repo(), number, label), check=False)
+    if result.returncode != 0 and "404" not in result.stderr:
+        raise RuntimeError("could not remove the label %s: %s" % (label, result.stderr.strip()))
 
 
 def open_human_labels(issue):
@@ -50,19 +73,20 @@ def open_human_labels(issue):
 def command_for(issue):
     """register/remove for an open, human-opened issue carrying exactly one form label; else None.
 
-    A submission awaiting approval, or one a maintainer has decided on, is never handled as a new one.
+    A submission awaiting approval is never handled as a new one. A decision label alone does not stop
+    a submission that was not processed yet: once pending, the label is reviewed.
     """
     labels = open_human_labels(issue)
-    if labels is None or PENDING_LABEL in labels or labels & DECISIONS.keys():
+    if labels is None or PENDING_LABEL in labels:
         return None
     commands = {command for label, command in COMMANDS.items() if label in labels}
     return commands.pop() if len(commands) == 1 else None
 
 
 def decision_for(issue):
-    """approve/reject for an open, human-opened submit issue carrying exactly one decision label; else None."""
+    """approve/reject for an open, human-opened submit issue awaiting approval with exactly one decision label; else None."""
     labels = open_human_labels(issue)
-    if labels is None or SUBMIT_LABEL not in labels or "eklenti-kaldir" in labels:
+    if labels is None or SUBMIT_LABEL not in labels or PENDING_LABEL not in labels or "eklenti-kaldir" in labels:
         return None
     decisions = [command for label, command in DECISIONS.items() if label in labels]
     return decisions[0] if len(decisions) == 1 else None
@@ -80,6 +104,32 @@ def comment_from_file(number, text):
         gh("issue", "comment", str(number), "--repo", repo(), "--body-file", f.name)
     finally:
         os.unlink(f.name)
+
+
+def comment_once(number, marker, text):
+    """Posts marker + text unless a comment on the issue already carries the marker."""
+    existing = gh("api", "--paginate", "repos/%s/issues/%s/comments" % (repo(), number), "--jq", ".[].body").stdout
+    if marker not in existing:
+        comment_from_file(number, marker + "\n" + text)
+
+
+def finish(number, comment, labels=None):
+    """Answers an issue and closes it, dropping the approval labels so a reopened issue never replays a decision.
+
+    labels are the issue's known label names; when unknown (None) every approval label is removed.
+    """
+    comment_from_file(number, comment)
+    for label in (PENDING_LABEL, *DECISIONS):
+        if labels is None or label in labels:
+            remove_label(number, label)
+    gh("issue", "close", str(number), "--repo", repo())
+
+
+def finish_related(result):
+    """Answers and closes the other issues the CLI result names (e.g. every issue of a published record)."""
+    for item in result.get("related") or []:
+        if isinstance(item, dict) and isinstance(item.get("number"), int) and isinstance(item.get("comment"), str):
+            finish(item["number"], defuse_body(item["comment"]))
 
 
 def post_failure(number):
@@ -132,12 +182,14 @@ def handle(issue, command):
     result = run_cli(command, issue)
     comment = comment_of(result)
     push_registry()
-    comment_from_file(issue["number"], comment)
+    number = issue["number"]
     if command == "register" and result.get("pending") is True:
-        # Left open for the maintainer; the label also keeps the sweep from resubmitting it.
-        gh("issue", "edit", str(issue["number"]), "--repo", repo(), "--add-label", PENDING_LABEL)
-    else:
-        gh("issue", "close", str(issue["number"]), "--repo", repo())
+        # The label goes first: it keeps the sweep from resubmitting the issue, so the comment cannot repeat.
+        gh("issue", "edit", str(number), "--repo", repo(), "--add-label", PENDING_LABEL)
+        comment_once(number, PENDING_MARKER % (result.get("addon_id"), result.get("version")), comment)
+        return
+    finish(number, comment, open_human_labels(issue) or set())
+    finish_related(result)
 
 
 def process(issue):
@@ -160,6 +212,7 @@ def main(argv):
     if len(argv) == 3 and argv[1] == "fail":
         post_failure(int(argv[2]))
         return 0
+    ensure_labels()
     with open(argv[1], encoding="utf-8") as f:
         return process(json.load(f))
 

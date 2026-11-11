@@ -13,7 +13,7 @@ import os
 import re
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from . import package, version
@@ -26,6 +26,8 @@ MISSING_ASSET = "missing"
 INDEX_SCHEMA = 1
 MAX_MIN_VERSION = 2**31 - 1
 MAX_REASON = 500
+# Add-ons an author who is not approved yet may hold awaiting approval at once.
+MAX_PENDING = 3
 # Store limits on top of the install rules: one add-on must never push index.json past what the app reads.
 MAX_NAME = 100
 MAX_AUTHOR = 100
@@ -68,6 +70,8 @@ class Outcome:
     notify_login: str | None = None
     changed: bool = False
     pending: bool = False
+    # (issue number, Outcome) of other issues the workflow answers and closes along with this one.
+    related: list = field(default_factory=list)
 
 
 @dataclass
@@ -521,7 +525,25 @@ def _refresh_pending(record, release, asset, repo, info):
         record["rejected_versions"] = []
 
 
-def _register_checked(gh, addons_dir, release, asset, repo, info, author_id, trusted, expected_id=None):
+def _pending_of(addons_dir, author_id):
+    return [r for r in records(addons_dir, skip_corrupt=True) if not is_published(r) and r.get("owner_id") == author_id]
+
+
+def _track_issue(record, issue_number):
+    """Remembers the submit issues waiting on a pending record, so publishing or deleting it can close them all."""
+    issues = record.setdefault("pending_issues", [])
+    if _is_int(issue_number) and issue_number not in issues:
+        issues.append(issue_number)
+        issues.sort()
+
+
+def _related(record, outcome, issue_number):
+    """outcome with the record's other waiting issues attached (the current issue is answered directly)."""
+    outcome.related = [(n, outcome) for n in record.get("pending_issues", []) if n != issue_number]
+    return outcome
+
+
+def _register_checked(gh, addons_dir, release, asset, repo, info, author_id, trusted, expected_id=None, issue_number=None):
     if expected_id is not None and info.id != expected_id:
         return _register_rejected("en son Release'teki paketin kimliği `%s`, onay bekleyen kimlik `%s`." % (info.id, expected_id), "the package in the latest release has the id `%s`, not the pending id `%s`." % (info.id, expected_id), expected_id, info.version)
     full_name = repo.full_name or release.repo
@@ -530,7 +552,10 @@ def _register_checked(gh, addons_dir, release, asset, repo, info, author_id, tru
         record = _new_record(info, asset, release, repo, full_name)
         if trusted:
             return _published(info.id, info.version, save(addons_dir, record))
+        if len(_pending_of(addons_dir, author_id)) >= MAX_PENDING:
+            return _register_rejected("onay bekleyen en fazla %d eklentiniz olabilir. Depo yöneticisinin bekleyen gönderimlerinize karar vermesini bekleyin." % MAX_PENDING, "you can have at most %d add-ons awaiting approval. Wait until the registry maintainer has decided on your pending submissions." % MAX_PENDING, info.id, info.version)
         record["status"] = STATUS_PENDING
+        _track_issue(record, issue_number)
         return _pending(info.id, info.version, save(addons_dir, record))
     if record["owner_id"] != author_id:
         return _register_rejected("bu kimlik başka bir hesaba ait.", "this id belongs to another account.", info.id, info.version)
@@ -541,11 +566,14 @@ def _register_checked(gh, addons_dir, release, asset, repo, info, author_id, tru
     if not same:
         return _register_rejected("bu kimlik `%s` reposuna bağlı, başka bir repodan yayınlanamaz." % record["repo"], "this id is bound to the repository `%s` and cannot be published from another one." % record["repo"], info.id, info.version)
     was_pending = not is_published(record)
+    waiting = dict(record)
     if was_pending:
         _refresh_pending(record, release, asset, repo, info)
         if not trusted:
+            _track_issue(record, issue_number)
             return _pending(record["id"], record["current"]["version"], save(addons_dir, record))
         del record["status"]
+        record.pop("pending_issues", None)
     was_removed = bool(record.get("removed"))
     record["removed"] = False
     _refresh_names(record, repo)
@@ -553,19 +581,22 @@ def _register_checked(gh, addons_dir, release, asset, repo, info, author_id, tru
         events = _scan_record(gh, record, release, True, info, repo)
     except GitHubError:
         return _github_down(info.id, info.version)
-    return _explicit_outcome(record, events, was_removed, save(addons_dir, record), was_pending)
+    outcome = _explicit_outcome(record, events, was_removed, save(addons_dir, record), was_pending)
+    return _related(waiting, outcome, issue_number) if was_pending else outcome
 
 
-def register(gh, addons_dir, release_url, author_id, author_login, trusted=True):
+def register(gh, addons_dir, release_url, author_id, author_login, trusted=True, issue_number=None):
     """Handles a submit form: binds a new id to the author and repository, or updates an owned one.
 
     For an author who is not trusted (no maintainer approved them yet) a new id is only reserved:
-    the record is saved with status pending and stays out of the store until approve().
+    the record is saved with status pending and stays out of the store until approve(). An untrusted
+    author holds at most MAX_PENDING such reservations. issue_number is the form's issue, remembered on
+    a pending record so its issues can all be answered when it is published or deleted.
     """
     checked, outcome = _submission(gh, release_url, author_id)
     if outcome is not None:
         return outcome
-    return _register_checked(gh, addons_dir, *checked, author_id, trusted)
+    return _register_checked(gh, addons_dir, *checked, author_id, trusted, issue_number=issue_number)
 
 
 def _pending_target(gh, addons_dir, release_url, author_id):
@@ -573,7 +604,7 @@ def _pending_target(gh, addons_dir, release_url, author_id):
 
     With one pending record it is the target whatever the form says; with several, the form's release tells which.
     """
-    pending = [r for r in records(addons_dir, skip_corrupt=True) if not is_published(r) and r.get("owner_id") == author_id]
+    pending = _pending_of(addons_dir, author_id)
     if len(pending) <= 1:
         return (pending[0] if pending else None), None
     checked, outcome = _submission(gh, release_url, author_id)
@@ -582,8 +613,12 @@ def _pending_target(gh, addons_dir, release_url, author_id):
     return next((r for r in pending if r["id"] == checked[3].id), None), None
 
 
-def _publish_pending(gh, addons_dir, record):
-    """Publishes a pending record from its repository's latest release, checked again now."""
+def _publish_pending(gh, addons_dir, record, issue_number=None):
+    """Publishes a pending record from its repository's latest release, checked again now.
+
+    Only a publish answers the record's other waiting issues; after a failure they stay open, the
+    record stays pending, and the author's next form (now trusted) publishes it and answers them.
+    """
     try:
         release = gh.latest_release(record["repo"])
     except GitHubError:
@@ -593,27 +628,43 @@ def _publish_pending(gh, addons_dir, record):
     checked, outcome = _check_release(gh, release, record["owner_id"])
     if outcome is not None:
         return outcome
-    return _register_checked(gh, addons_dir, release, *checked, record["owner_id"], True, record["id"])
+    return _register_checked(gh, addons_dir, release, *checked, record["owner_id"], True, record["id"], issue_number)
 
 
-def approve(gh, addons_dir, release_url, author_id, author_login):
-    """A maintainer approved the form's author, who the caller has already added to the trusted authors.
-
-    Their pending add-on is published from its latest release; with nothing pending the form is handled
-    as a trusted submission. A failed publish leaves the record pending, so the author's next form publishes it.
-    """
-    record, outcome = _pending_target(gh, addons_dir, release_url, author_id)
-    if outcome is None:
-        outcome = register(gh, addons_dir, release_url, author_id, author_login, True) if record is None else _publish_pending(gh, addons_dir, record)
+def _approved(outcome):
     tr = "Yazar onaylandı, yeni sürümleri ve yeni eklentileri artık otomatik yayına girer. " + outcome.message_tr
     en = "The author is approved; their new releases and new add-ons now publish automatically. " + outcome.message_en
     if not outcome.ok:
         tr += " Sorunu düzeltip formu yeniden gönderdiğinizde eklenti otomatik yayına girer."
         en += " Fix the problem and submit the form again; the add-on then publishes automatically."
-    return Outcome(outcome.ok, outcome.addon_id, outcome.version, tr, en, None, outcome.changed)
+    result = Outcome(outcome.ok, outcome.addon_id, outcome.version, tr, en, None, outcome.changed)
+    result.related = [(n, result) for n, _ in outcome.related]
+    return result
 
 
-def reject(gh, addons_dir, release_url, author_id):
+def approve(gh, addons_dir, release_url, author_id, author_login, issue_number=None):
+    """A maintainer approved the form's author, who the caller has already added to the trusted authors.
+
+    Every pending add-on of the author is published from its latest release, checked again now; the form's
+    own one decides the main outcome, and with none pending the form is handled as a trusted submission.
+    The issues of every published record come back in related. A failed publish leaves that record
+    pending, so the author's next form publishes it.
+    """
+    record, outcome = _pending_target(gh, addons_dir, release_url, author_id)
+    if outcome is None:
+        outcome = register(gh, addons_dir, release_url, author_id, author_login, True, issue_number) if record is None else _publish_pending(gh, addons_dir, record, issue_number)
+    result = _approved(outcome)
+    target = record["id"] if record is not None else None
+    for other in _pending_of(addons_dir, author_id):
+        if other["id"] == target:
+            continue
+        done = _approved(_publish_pending(gh, addons_dir, other))
+        result.changed = result.changed or done.changed
+        result.related.extend(done.related)
+    return result
+
+
+def reject(gh, addons_dir, release_url, author_id, issue_number=None):
     """A maintainer rejected the form's first submission: the pending record is deleted, freeing its id."""
     record, outcome = _pending_target(gh, addons_dir, release_url, author_id)
     if outcome is not None:
@@ -622,7 +673,8 @@ def reject(gh, addons_dir, release_url, author_id):
         return Outcome(True, None, None, "Onay bekleyen bir gönderim bulunamadı, hiçbir şey değişmedi.", "No submission awaiting approval was found; nothing was changed.")
     ver = (record.get("current") or {}).get("version")
     label = _label(record["id"], ver)
-    return Outcome(True, record["id"], ver, label + " reddedildi: depo yöneticisi ilk gönderimi onaylamadı, eklenti yayına alınmadı. Kimlik serbest bırakıldı.", label + " was rejected: the registry maintainer did not approve the first submission, so the add-on was not published. The id is free again.", None, _delete(addons_dir, record["id"]))
+    outcome = Outcome(True, record["id"], ver, label + " reddedildi: depo yöneticisi ilk gönderimi onaylamadı, eklenti yayına alınmadı. Kimlik serbest bırakıldı.", label + " was rejected: the registry maintainer did not approve the first submission, so the add-on was not published. The id is free again.", None, _delete(addons_dir, record["id"]))
+    return _related(record, outcome, issue_number)
 
 
 def remove(gh, addons_dir, addon_id, author_id):
@@ -637,7 +689,8 @@ def remove(gh, addons_dir, addon_id, author_id):
     if record["owner_id"] != author_id:
         return Outcome(False, addon_id, ver, "Kaldırma reddedildi: %s eklentisini yalnız sahibi kaldırabilir." % label, "Removal was rejected: only the owner can remove %s." % label)
     if not is_published(record):
-        return Outcome(True, addon_id, ver, label + " için onay bekleyen gönderim geri çekildi, kimlik serbest bırakıldı.", "The submission of %s awaiting approval was withdrawn and the id is free again." % label, None, _delete(addons_dir, addon_id))
+        # The remove form is its own issue, so every submit issue of the record is answered and closed.
+        return _related(record, Outcome(True, addon_id, ver, label + " için onay bekleyen gönderim sahibi tarafından geri çekildi, kimlik serbest bırakıldı.", "The submission of %s awaiting approval was withdrawn by its owner and the id is free again." % label, None, _delete(addons_dir, addon_id)), None)
     if record.get("removed"):
         return Outcome(True, addon_id, ver, label + " zaten kaldırılmış.", label + " is already removed.")
     record["removed"] = True

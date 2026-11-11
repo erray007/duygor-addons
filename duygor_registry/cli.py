@@ -4,7 +4,9 @@ register/remove: read the issue (JSON file with issue_number, author_id, author_
 print {ok, message_tr, message_en, changed, pending, comment} for the workflow to post. pending is
 true when an unapproved author's first submission was reserved and now awaits a maintainer.
 approve/reject: a maintainer's decision on such a submit issue; --sender-id is who added the label,
-and anyone not in config.json maintainers gets {authorized: false} with nothing changed.
+and anyone not in config.json maintainers gets {authorized: false} with nothing changed. related lists
+the other issues to answer and close ({number, comment}). check-sender: {maintainer, comment} for whoever
+added a decision label.
 scan: print the issues to open as a JSON list of {title, body}; nothing is opened here.
 build-index: write the index.json the app downloads.
 Handled outcomes always exit with 0; only broken input or state exits non-zero.
@@ -97,15 +99,21 @@ def _read_issue(path):
     if not isinstance(author_id, int) or isinstance(author_id, bool):
         raise ValueError("issue JSON needs an integer author_id")
     body = issue.get("body")
-    return author_id, str(issue.get("author_login") or ""), body if isinstance(body, str) else ""
+    number = issue.get("issue_number")
+    number = number if isinstance(number, int) and not isinstance(number, bool) else None
+    return author_id, str(issue.get("author_login") or ""), body if isinstance(body, str) else "", number
 
 
 def _print(value):
     sys.stdout.write(json.dumps(value, sort_keys=True) + "\n")
 
 
+def _comment(outcome):
+    return outcome.message_tr + "\n\n" + outcome.message_en
+
+
 def _print_outcome(outcome, **extra):
-    _print({"ok": outcome.ok, "message_tr": outcome.message_tr, "message_en": outcome.message_en, "changed": outcome.changed, "pending": outcome.pending, "comment": outcome.message_tr + "\n\n" + outcome.message_en, **extra})
+    _print({"ok": outcome.ok, "message_tr": outcome.message_tr, "message_en": outcome.message_en, "changed": outcome.changed, "pending": outcome.pending, "addon_id": outcome.addon_id, "version": outcome.version, "related": [{"number": n, "comment": _comment(o)} for n, o in outcome.related], "comment": _comment(outcome), **extra})
 
 
 def _unauthorized(command):
@@ -118,12 +126,12 @@ def _decide(args, gh):
     a package that fails now publishes on the author's next form."""
     if args.sender_id not in trust.maintainers(args.config):
         return _unauthorized(args.command), False
-    author_id, author_login, body = _read_issue(args.issue_json)
+    author_id, author_login, body, number = _read_issue(args.issue_json)
     url = parse_submit(body)[0]
     if args.command == "reject":
-        return registry.reject(_client(gh), args.addons, url, author_id), True
+        return registry.reject(_client(gh), args.addons, url, author_id, number), True
     trust.add(author_id, author_login, args.trusted)
-    return registry.approve(_client(gh), args.addons, url, author_id, author_login), True
+    return registry.approve(_client(gh), args.addons, url, author_id, author_login, number), True
 
 
 class IssueRecorder:
@@ -201,6 +209,10 @@ def _parser():
             p.add_argument("--trusted", default=trust.TRUSTED)
         if name in ("approve", "reject"):
             p.add_argument("--sender-id", type=int, required=True)
+    p = sub.add_parser("check-sender")
+    p.add_argument("--sender-id", type=int, required=True)
+    p.add_argument("--decision", choices=("approve", "reject"), required=True)
+    p.add_argument("--config", default=trust.CONFIG)
     p = sub.add_parser("scan")
     p.add_argument("--addons", default="addons")
     p = sub.add_parser("build-index")
@@ -214,16 +226,18 @@ def main(argv=None, gh=None):
     args = _parser().parse_args(argv)
     try:
         if args.command == "register":
-            author_id, author_login, body = _read_issue(args.issue_json)
+            author_id, author_login, body, number = _read_issue(args.issue_json)
             url, outcome = parse_submit(body)
             if outcome is None:
-                outcome = registry.register(_client(gh), args.addons, url, author_id, author_login, trust.is_trusted(author_id, args.config, args.trusted))
+                outcome = registry.register(_client(gh), args.addons, url, author_id, author_login, trust.is_trusted(author_id, args.config, args.trusted), number)
             _print_outcome(outcome)
+        elif args.command == "check-sender":
+            _print({"maintainer": args.sender_id in trust.maintainers(args.config), "comment": _comment(_unauthorized(args.decision))})
         elif args.command in ("approve", "reject"):
             outcome, authorized = _decide(args, gh)
             _print_outcome(outcome, authorized=authorized)
         elif args.command == "remove":
-            author_id, _, body = _read_issue(args.issue_json)
+            author_id, _, body, _ = _read_issue(args.issue_json)
             addon_id, outcome = parse_remove(body)
             if outcome is None:
                 outcome = registry.remove(_client(gh), args.addons, addon_id, author_id)
