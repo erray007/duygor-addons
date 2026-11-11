@@ -83,6 +83,61 @@ def test_register_two_assets_rejected(gh, addons):
     assert os.listdir(addons) == []
 
 
+def register_entries(gh, addons, entries, ver="1.0", body="What is new"):
+    return register_demo(gh, addons, ver, data=make_zip(entries), body=body)[1]
+
+
+@pytest.mark.parametrize("key, limit", [("ad", registry.MAX_NAME), ("yazar", registry.MAX_AUTHOR), ("aciklama", registry.MAX_DESCRIPTION)])
+def test_register_text_limits(gh, addons, key, limit):
+    assert register_entries(gh, addons, valid_entries(**{key: "x" * limit})).ok
+    outcome = register_entries(gh, addons, valid_entries(surum="1.1", **{key: "y" * (limit + 1)}), "1.1")
+    assert not outcome.ok and str(limit) in outcome.message_en and str(limit) in outcome.message_tr
+    assert_bilingual(outcome)
+    assert record(addons)["current"]["version"] == "1.0"
+
+
+@pytest.mark.parametrize("source, limit", [("Demo", registry.MAX_NAME), ("Does things", registry.MAX_DESCRIPTION)])
+def test_register_translated_text_limits(gh, addons, source, limit):
+    entries = valid_entries()
+    entries["languages/en.json"] = {source: "x" * (limit + 1)}
+    outcome = register_entries(gh, addons, entries)
+    assert not outcome.ok and "(en)" in outcome.message_en and "(en)" in outcome.message_tr
+    assert os.listdir(addons) == []
+
+
+def test_register_language_count_limit(gh, addons):
+    tags = sorted({a + b for a in "abcdefghijklmnopqrstuvwxyz" for b in "abcdefghijklmnopqrstuvwxyz"} - {"tr"})
+    entries = valid_entries()
+    for tag in tags[: registry.MAX_LANGUAGES]:
+        entries["languages/%s.json" % tag] = {}
+    assert register_entries(gh, addons, entries).ok
+    entries = valid_entries(surum="1.1")
+    for tag in tags[: registry.MAX_LANGUAGES + 1]:
+        entries["languages/%s.json" % tag] = {}
+    outcome = register_entries(gh, addons, entries, "1.1")
+    assert not outcome.ok and str(registry.MAX_LANGUAGES) in outcome.message_en
+    assert_bilingual(outcome)
+
+
+def test_scan_update_text_limit_rejected(gh, addons):
+    register_demo(gh, addons)
+    gh.publish(REPO, "v1.1", make_zip(valid_entries(surum="1.1", ad="n" * (registry.MAX_NAME + 1))))
+    outcomes = registry.scan(gh, addons)
+    assert len(outcomes) == 1 and not outcomes[0].ok and str(registry.MAX_NAME) in outcomes[0].message_en
+    assert record(addons)["current"]["version"] == "1.0"
+
+
+def test_changelog_truncated(gh, addons):
+    assert register_entries(gh, addons, valid_entries(), body="c" * registry.MAX_CHANGELOG).ok
+    assert record(addons)["current"]["changelog"] == "c" * registry.MAX_CHANGELOG
+    gh.publish(REPO, "v1.1", package(ver="1.1"), body="  " + "d" * (registry.MAX_CHANGELOG * 3) + "  ")
+    registry.scan(gh, addons)
+    changelog = record(addons)["current"]["changelog"]
+    assert len(changelog) == registry.MAX_CHANGELOG and changelog == "d" * (registry.MAX_CHANGELOG - 1) + "…"
+    entry = registry.build_index(addons, True)["addons"][0]
+    assert entry["changelog"] == changelog
+
+
 def test_register_not_owner_rejected(gh, addons):
     _, outcome = register_demo(gh, addons, author=BOB)
     assert not outcome.ok
@@ -353,6 +408,41 @@ def test_build_index_never_emits_invalid_entries(gh, addons):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(bad, f)
         assert registry.build_index(addons, True)["addons"] == [], key
+
+
+def test_build_index_size_limit(gh, addons, monkeypatch):
+    register_demo(gh, addons)
+    size = len(registry.index_json(registry.build_index(addons, True)).encode("utf-8"))
+    assert registry.MAX_INDEX_BYTES == 2 * 1024 * 1024
+    monkeypatch.setattr(registry, "MAX_INDEX_BYTES", size + 1)
+    registry.build_index(addons, True)
+    monkeypatch.setattr(registry, "MAX_INDEX_BYTES", size)
+    with pytest.raises(registry.IndexTooLarge) as e:
+        registry.build_index(addons, True)
+    assert isinstance(e.value, ValueError) and str(size) in str(e.value)
+
+
+def test_build_index_rejects_hostile_records(gh, addons):
+    register_demo(gh, addons)
+    path = os.path.join(addons, "demo.json")
+    bad = record(addons)
+    bad["current"]["changelog"] = "\x01" * (registry.MAX_INDEX_BYTES // 6 + 1)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(bad, f)
+    with pytest.raises(registry.IndexTooLarge):
+        registry.build_index(addons, True)
+
+
+def test_id_leading_dot_rejected(gh, addons):
+    for bad in (".", "..", ".x"):
+        assert not registry.remove(gh, addons, bad, ALICE).ok
+    register_demo(gh, addons)
+    path = os.path.join(addons, ".x.json")
+    good = record(addons)
+    good["id"] = ".x"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(good, f)
+    assert [a["id"] for a in registry.build_index(addons, True)["addons"]] == ["demo"]
 
 
 def test_parse_release_url():

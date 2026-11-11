@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from duygor_registry import cli
+from duygor_registry import cli, registry
 from fake_github import FakeGitHub, package
 
 ALICE = 1001
@@ -122,6 +122,17 @@ def test_cli_build_index(env, capsys):
     assert json.loads(out.read_bytes())["storeEnabled"] is True
     config.write_text('{"storeEnabled": "no"}', encoding="utf-8")
     assert cli.main(["build-index", "--out", str(out), "--addons", addons, "--config", str(config)]) != 0
+
+
+def test_cli_build_index_too_large_keeps_old_file(env, capsys, monkeypatch):
+    gh, addons, tmp = env
+    run(capsys, ["register", "--issue-json", issue_file(tmp, submit_body()), "--addons", addons], gh)
+    out = tmp / "index.json"
+    out.write_bytes(b"old\n")
+    monkeypatch.setattr(registry, "MAX_INDEX_BYTES", 10)
+    assert cli.main(["build-index", "--out", str(out), "--addons", addons, "--config", str(tmp / "missing.json")]) == 2
+    assert out.read_bytes() == b"old\n"
+    assert "too large" in capsys.readouterr().err
 
 
 def test_cli_scan_survives_a_failing_record(env, capsys):

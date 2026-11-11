@@ -127,6 +127,23 @@ def test_error_id(bad):
     assert code_of(make_zip(valid_entries(kimlik=bad))) == "id"
 
 
+@pytest.mark.parametrize("bad", [".", "..", "...", ".x", ".hidden.addon"])
+def test_error_id_leading_dot(bad):
+    assert code_of(make_zip(valid_entries(kimlik=bad))) == "id"
+
+
+def test_id_inner_and_trailing_dots_ok():
+    assert inspect(make_zip(valid_entries(kimlik="a.b."))).id == "a.b."
+
+
+def test_manifest_with_utf8_bom_accepted():
+    text = json.dumps(valid_entries()["manifest.json"])
+    entries = valid_entries()
+    entries["manifest.json"] = b"\xef\xbb\xbf" + text.encode("utf-8")
+    info = inspect(make_zip(entries))
+    assert info.id == "demo" and info.version == "1.0"
+
+
 def test_error_id_missing():
     assert code_of(make_zip(valid_entries(kimlik=None))) == "id"
 

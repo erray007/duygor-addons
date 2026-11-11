@@ -18,7 +18,9 @@ CHUNK = 64 * 1024
 DEFAULT_SOURCE_LANGUAGE = "tr"
 DEFAULT_VERSION = "1.0"
 
-_ID = re.compile(r"[a-z0-9_.-]{1,64}")
+# A leading dot is refused so no id can name ., .. or a hidden file (EklentiBilgisi.gecerliKimlik).
+ID = re.compile(r"(?!\.)[a-z0-9_.-]{1,64}")
+BOM = "\ufeff"
 _TRIM = "".join(chr(i) for i in range(33))
 _ZIP_ERRORS = (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError, OSError, ValueError, OverflowError)
 
@@ -121,8 +123,8 @@ def _opt_int(obj, key, default):
 
 
 def _decode_json(raw):
-    text = raw.decode("utf-8", errors="replace")
-    return json.loads(text)
+    # A UTF-8 BOM (added by some Windows editors) is stripped, like the app does.
+    return json.loads(raw.decode("utf-8", errors="replace").removeprefix(BOM))
 
 
 def _parse_manifest(raw):
@@ -136,10 +138,8 @@ def _parse_manifest(raw):
 
 
 def _translation_table(name, raw):
-    # A UTF-8 BOM (added by some Windows editors) is stripped, like EklentiCevirisi does.
-    text = raw.decode("utf-8", errors="replace").removeprefix("﻿")
     try:
-        obj = json.loads(text)
+        obj = _decode_json(raw)
     except (ValueError, RecursionError):
         obj = None
     if not isinstance(obj, dict):
@@ -211,8 +211,8 @@ def inspect(data):
     description = _opt_string(manifest, "aciklama", _opt_string(manifest, "description", "")).strip(_TRIM)
     min_version = _opt_int(manifest, "minDuygorSurumu", _opt_int(manifest, "minVersion", 0))
     source = language.normalize(_opt_string(manifest, "dil", _opt_string(manifest, "language", ""))) or DEFAULT_SOURCE_LANGUAGE
-    if not _ID.fullmatch(package_id):
-        raise PackageError("id", "manifest.json: kimlik geçersiz (a-z, 0-9, _ . - ve en fazla 64 karakter).", "manifest.json: id is invalid (a-z, 0-9, _ . - and at most 64 characters).")
+    if not ID.fullmatch(package_id):
+        raise PackageError("id", "manifest.json: kimlik geçersiz (a-z, 0-9, _ . - ve en fazla 64 karakter, nokta ile başlayamaz).", "manifest.json: id is invalid (a-z, 0-9, _ . - and at most 64 characters, not starting with a dot).")
     if not version.is_valid(package_version):
         raise PackageError("version", "manifest.json: surum geçersiz: " + package_version, "manifest.json: version is invalid: " + package_version)
     if name == "":

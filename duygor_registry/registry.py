@@ -24,11 +24,22 @@ MISSING_ASSET = "missing"
 INDEX_SCHEMA = 1
 MAX_MIN_VERSION = 2**31 - 1
 MAX_REASON = 500
+# Store limits on top of the install rules: one add-on must never push index.json past what the app reads.
+MAX_NAME = 100
+MAX_AUTHOR = 100
+MAX_DESCRIPTION = 2000
+MAX_LANGUAGES = 64
+MAX_CHANGELOG = 10000
+MAX_INDEX_BYTES = 2 * 1024 * 1024
 RECORD_EXTENSION = ".json"
 
-_ID = re.compile(r"[a-z0-9_.-]{1,64}")
+_ID = package.ID
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _log = logging.getLogger(__name__)
+
+
+class IndexTooLarge(ValueError):
+    """build_index refuses to produce an index the app could not read; nothing is published then."""
 
 
 @dataclass
@@ -178,16 +189,38 @@ def _fetch(gh, asset):
         raise package._size_error() from None
 
 
+def _limit_error(what_tr, what_en, limit):
+    return PackageError("limit", "%s %d karakterden uzun olamaz." % (what_tr, limit), "%s cannot be longer than %d characters." % (what_en, limit))
+
+
+def _check_texts(texts, limit, what_tr, what_en):
+    for tag in sorted(texts):
+        if len(texts[tag]) > limit:
+            raise _limit_error("%s (%s)" % (what_tr, tag), "%s (%s)" % (what_en, tag), limit)
+
+
 def _inspect(data):
-    """package.inspect plus the limits the app's index parser applies on top of it."""
+    """package.inspect plus the limits the app's index parser applies on top of it and the store's size limits."""
     info = package.inspect(data)
     if not 0 <= info.min_version <= MAX_MIN_VERSION:
         raise PackageError("min_version", "manifest.json: minDuygorSurumu geçersiz: %d" % info.min_version, "manifest.json: minDuygorSurumu is invalid: %d" % info.min_version)
+    if len(info.languages) > MAX_LANGUAGES:
+        raise PackageError("limit", "en fazla %d dil dosyası olabilir, %d bulundu." % (MAX_LANGUAGES, len(info.languages)), "at most %d language files are allowed, found %d." % (MAX_LANGUAGES, len(info.languages)))
+    if len(info.author) > MAX_AUTHOR:
+        raise _limit_error("manifest.json: yazar", "manifest.json: the author", MAX_AUTHOR)
+    _check_texts(info.names, MAX_NAME, "Eklenti adı", "The add-on name")
+    _check_texts(info.descriptions, MAX_DESCRIPTION, "Eklenti açıklaması", "The add-on description")
     return info
 
 
+def _changelog(release):
+    """The release notes are the author's free text, so the index keeps at most MAX_CHANGELOG characters of them."""
+    text = (release.body or "").strip()
+    return text if len(text) <= MAX_CHANGELOG else text[: MAX_CHANGELOG - 1] + "…"
+
+
 def _current(info, asset, release):
-    return {"version": info.version, "min_version": info.min_version, "author": info.author, "url": asset.url, "sha256": info.sha256, "size": info.size, "asset_id": asset.id, "asset_updated_at": asset.updated_at, "changelog": (release.body or "").strip(), "published": release.published_at, "source_language": info.source_language, "languages": list(info.languages), "names": dict(info.names), "descriptions": dict(info.descriptions)}
+    return {"version": info.version, "min_version": info.min_version, "author": info.author, "url": asset.url, "sha256": info.sha256, "size": info.size, "asset_id": asset.id, "asset_updated_at": asset.updated_at, "changelog": _changelog(release), "published": release.published_at, "source_language": info.source_language, "languages": list(info.languages), "names": dict(info.names), "descriptions": dict(info.descriptions)}
 
 
 def _reject_version(record, found, tr, en):
@@ -481,7 +514,7 @@ def _entry(record):
 
 
 def build_index(addons_dir, store_enabled):
-    """The index.json document the app reads; removed and hidden add-ons are left out."""
+    """The index.json document the app reads; removed and hidden add-ons are left out. Raises IndexTooLarge."""
     addons = []
     for record in records(addons_dir):
         if record.get("removed") or record.get("hidden_reason"):
@@ -490,7 +523,12 @@ def build_index(addons_dir, store_enabled):
         if entry is not None:
             addons.append(entry)
     addons.sort(key=lambda e: e["id"])
-    return {"schema": INDEX_SCHEMA, "storeEnabled": bool(store_enabled), "movedTo": None, "addons": addons}
+    index = {"schema": INDEX_SCHEMA, "storeEnabled": bool(store_enabled), "movedTo": None, "addons": addons}
+    # The app refuses bodies over 4 MB, which would also hide the kill switch, so an oversized index is never built.
+    size = len(index_json(index).encode("utf-8"))
+    if size >= MAX_INDEX_BYTES:
+        raise IndexTooLarge("index.json would be %d bytes, too large (limit %d)" % (size, MAX_INDEX_BYTES))
+    return index
 
 
 def index_json(index):
