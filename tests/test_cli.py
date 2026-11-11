@@ -1,3 +1,4 @@
+import http.client
 import json
 import os
 
@@ -121,3 +122,15 @@ def test_cli_build_index(env, capsys):
     assert json.loads(out.read_bytes())["storeEnabled"] is True
     config.write_text('{"storeEnabled": "no"}', encoding="utf-8")
     assert cli.main(["build-index", "--out", str(out), "--addons", addons, "--config", str(config)]) != 0
+
+
+def test_cli_scan_survives_a_failing_record(env, capsys):
+    gh, addons, tmp = env
+    run(capsys, ["register", "--issue-json", issue_file(tmp, submit_body()), "--addons", addons], gh)
+    gh.add_repo("alice/zzz", ALICE)
+    gh.publish("alice/zzz", "v1", package("zzz", "1.0"))
+    run(capsys, ["register", "--issue-json", issue_file(tmp, submit_body("https://github.com/alice/zzz/releases/tag/v1")), "--addons", addons], gh)
+    gh.publish(REPO, "v2", package("other", "2.0"))
+    gh.raising["alice/zzz"] = http.client.IncompleteRead(b"")
+    issues = run(capsys, ["scan", "--addons", addons], gh)
+    assert len(issues) == 1 and issues[0]["title"].startswith("demo 2.0")

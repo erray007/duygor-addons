@@ -3,6 +3,7 @@
 Tests use an in-memory fake with the same methods; nothing here runs without a real network call.
 """
 
+import http.client
 import json
 import os
 import re
@@ -24,6 +25,11 @@ _OWNER = r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}"
 _NAME = r"[A-Za-z0-9._-]{1,100}"
 _REPO = re.compile("(" + _OWNER + ")/(" + _NAME + ")")
 _RELEASE_PATH = re.compile("/(" + _OWNER + ")/(" + _NAME + ")/releases/tag/(.+)")
+# Every failure of a connection or a read: URLError and timeouts are OSError, IncompleteRead,
+# BadStatusLine and LineTooLong are HTTPException, a malformed URL is ValueError.
+_NETWORK_ERRORS = (OSError, http.client.HTTPException, ValueError)
+# What a JSON answer of an unexpected shape raises while it is mapped.
+_SHAPE_ERRORS = (KeyError, TypeError, ValueError, AttributeError, IndexError)
 
 
 class GitHubError(Exception):
@@ -87,7 +93,7 @@ def parse_release_url(url):
         raise ValueError("Not a GitHub release URL: " + url)
     # Git ref names never end with "/", so a trailing slash is only URL noise.
     tag = urllib.parse.unquote(m.group(3)).rstrip("/")
-    if not tag or any(ord(c) < 32 or ord(c) == 127 for c in tag):
+    if not tag or any(ord(c) < 32 or ord(c) == 127 for c in tag) or any(part in ("", ".", "..") for part in tag.split("/")):
         raise ValueError("Invalid release tag: " + url)
     return m.group(1) + "/" + m.group(2), tag
 
@@ -118,12 +124,33 @@ class _HttpsRedirect(urllib.request.HTTPRedirectHandler):
         return new
 
 
+def _shape_error(what):
+    return GitHubError(0, "unexpected API answer for " + what)
+
+
 def _asset(obj):
-    return Asset(int(obj["id"]), str(obj["name"]), int(obj["size"]), str(obj.get("updated_at") or ""), str(obj.get("browser_download_url") or ""))
+    try:
+        return Asset(int(obj["id"]), str(obj["name"]), int(obj["size"]), str(obj.get("updated_at") or ""), str(obj.get("browser_download_url") or ""))
+    except _SHAPE_ERRORS:
+        raise _shape_error("an asset") from None
 
 
 def _release(repo, obj):
-    return Release(repo, str(obj.get("tag_name") or ""), bool(obj.get("draft")), bool(obj.get("prerelease")), str(obj.get("body") or ""), [_asset(a) for a in obj.get("assets") or []], str(obj.get("published_at") or ""))
+    try:
+        assets = obj.get("assets") or []
+        if not isinstance(assets, list):
+            raise TypeError("assets")
+        return Release(repo, str(obj.get("tag_name") or ""), bool(obj.get("draft")), bool(obj.get("prerelease")), str(obj.get("body") or ""), [_asset(a) for a in assets], str(obj.get("published_at") or ""))
+    except _SHAPE_ERRORS:
+        raise _shape_error("a release of " + repo) from None
+
+
+def _repo(repo, obj):
+    try:
+        owner = obj["owner"]
+        return Repo(int(owner["id"]), str(owner["login"]), str(owner["type"]), str(obj.get("full_name") or repo))
+    except _SHAPE_ERRORS:
+        raise _shape_error("the repository " + repo) from None
 
 
 class GitHub:
@@ -144,10 +171,11 @@ class GitHub:
         except urllib.error.HTTPError as e:
             e.close()
             raise GitHubError(e.code, e.reason) from None
-        except (urllib.error.URLError, OSError, ValueError) as e:
-            raise GitHubError(0, str(e)) from None
+        except _NETWORK_ERRORS as e:
+            raise GitHubError(0, "%s: %s" % (type(e).__name__, e)) from None
 
     def _api(self, method, path, payload=None):
+        """A JSON object answer; every failure, including an empty or non-object body, is a GitHubError."""
         data = None
         headers = self.headers()
         if payload is not None:
@@ -159,12 +187,15 @@ class GitHub:
                 raw = read_limited(response, MAX_API_BYTES)
             except DownloadTooLarge:
                 raise GitHubError(0, "API answer too large: " + path) from None
-            except OSError as e:
-                raise GitHubError(0, str(e)) from None
+            except _NETWORK_ERRORS as e:
+                raise GitHubError(0, "%s: %s" % (type(e).__name__, e)) from None
         try:
-            return json.loads(raw) if raw else None
-        except ValueError:
-            raise GitHubError(0, "API answer is not JSON: " + path) from None
+            obj = json.loads(raw)
+        except (ValueError, RecursionError):
+            obj = None
+        if not isinstance(obj, dict):
+            raise GitHubError(0, "API answer is not a JSON object: " + path)
+        return obj
 
     def _optional(self, path):
         try:
@@ -183,9 +214,7 @@ class GitHub:
         return None if obj is None else _release(repo, obj)
 
     def get_repo(self, repo):
-        obj = self._api("GET", "/repos/" + check_repo(repo))
-        owner = obj["owner"]
-        return Repo(int(owner["id"]), str(owner["login"]), str(owner["type"]), str(obj.get("full_name") or repo))
+        return _repo(repo, self._api("GET", "/repos/" + check_repo(repo)))
 
     def get_asset(self, repo, asset_id):
         obj = self._optional("/repos/%s/releases/assets/%d" % (check_repo(repo), int(asset_id)))
@@ -204,8 +233,8 @@ class GitHub:
                 return read_limited(response, max_bytes)
             except DownloadTooLarge:
                 raise DownloadTooLarge(url) from None
-            except OSError as e:
-                raise GitHubError(0, str(e)) from None
+            except _NETWORK_ERRORS as e:
+                raise GitHubError(0, "%s: %s" % (type(e).__name__, e)) from None
 
     def comment(self, issue, body):
         self._api("POST", "/repos/%s/issues/%d/comments" % (self.repo, int(issue)), {"body": body})
@@ -214,4 +243,8 @@ class GitHub:
         self._api("PATCH", "/repos/%s/issues/%d" % (self.repo, int(issue)), {"state": "closed"})
 
     def open_issue(self, title, body):
-        return int(self._api("POST", "/repos/%s/issues" % self.repo, {"title": title, "body": body})["number"])
+        obj = self._api("POST", "/repos/%s/issues" % self.repo, {"title": title, "body": body})
+        try:
+            return int(obj["number"])
+        except _SHAPE_ERRORS:
+            raise _shape_error("a new issue") from None

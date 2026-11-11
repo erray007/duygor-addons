@@ -1,4 +1,5 @@
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -357,7 +358,7 @@ def test_build_index_never_emits_invalid_entries(gh, addons):
 def test_parse_release_url():
     assert parse_release_url("https://github.com/alice/duygor-addon-x/releases/tag/v1.0") == ("alice/duygor-addon-x", "v1.0")
     assert parse_release_url(" https://GitHub.com/a-b/c.d_e/releases/tag/release%2F2 \n") == ("a-b/c.d_e", "release/2")
-    for url in ["http://github.com/a/b/releases/tag/v1", "https://github.com.evil.com/a/b/releases/tag/v1", "https://user@github.com/a/b/releases/tag/v1", "https://github.com:444/a/b/releases/tag/v1", "https://github.com/a/b/releases/tag/", "https://github.com/a/b/releases/latest", "https://github.com/a/b/tree/v1", "https://github.com/a/b/releases/tag/v1?x=1", "https://github.com/a/b/releases/tag/v1#x", "https://github.com/-a/b/releases/tag/v1", "https://github.com/a/../releases/tag/v1", "https://github.com/a/b/c/releases/tag/v1", "", None]:
+    for url in ["http://github.com/a/b/releases/tag/v1", "https://github.com.evil.com/a/b/releases/tag/v1", "https://user@github.com/a/b/releases/tag/v1", "https://github.com:444/a/b/releases/tag/v1", "https://github.com/a/b/releases/tag/", "https://github.com/a/b/releases/latest", "https://github.com/a/b/tree/v1", "https://github.com/a/b/releases/tag/v1?x=1", "https://github.com/a/b/releases/tag/v1#x", "https://github.com/-a/b/releases/tag/v1", "https://github.com/a/../releases/tag/v1", "https://github.com/a/b/c/releases/tag/v1", "https://github.com/a/b/releases/tag/.", "https://github.com/a/b/releases/tag/..", "https://github.com/a/b/releases/tag/%2e%2E", "https://github.com/a/b/releases/tag/x/../y", "https://github.com/a/b/releases/tag/x//y", "https://github.com/a/b/releases/tag/%2F", "", None]:
         with pytest.raises(ValueError):
             parse_release_url(url)
 
@@ -380,3 +381,116 @@ def test_real_client_without_network():
     assert headers["Authorization"] == "Bearer t" and headers["Accept"] == "application/vnd.github+json" and headers["X-GitHub-Api-Version"] == "2022-11-28"
     with pytest.raises(GitHubError):
         client.download("http://github.com/a/b/releases/download/v1/x.dgp", 10)
+
+
+def test_scan_unexpected_errors_do_not_stop_other_records(gh, addons):
+    for addon_id in ("aaa", "mmm", "zzz"):
+        gh.add_repo("alice/" + addon_id, ALICE)
+        release = gh.publish("alice/" + addon_id, "v1", package(addon_id, "1.0"))
+        assert registry.register(gh, addons, gh.url_of(release), ALICE, "alice").ok
+    register_demo(gh, addons)
+    gh.raising["alice/aaa"] = http.client.IncompleteRead(b"partial")
+    gh.raising["alice/mmm"] = KeyError("owner")
+    gh.publish(REPO, "v1.1", package(ver="1.1"))
+    gh.publish("alice/zzz", "v2", make_zip({"manifest.json": {"kimlik": "zzz", "surum": "2.0"}}))
+    outcomes = registry.scan(gh, addons)
+    assert [(o.addon_id, o.ok) for o in outcomes] == [("aaa", False), ("demo", True), ("mmm", False), ("zzz", False)]
+    assert "IncompleteRead" in outcomes[0].message_en and "KeyError" in outcomes[2].message_en
+    assert record(addons)["current"]["version"] == "1.1"
+    assert len(gh.issues) == 1 and gh.issues[0][0].startswith("zzz 2.0")
+
+
+def test_owner_and_repo_rename_followed(gh, addons):
+    register_demo(gh, addons)
+    gh.rename(REPO, "alice2/demo-renamed", "alice2")
+    gh.publish("alice2/demo-renamed", "v1.1", package(ver="1.1"))
+    outcomes = registry.scan(gh, addons)
+    assert outcomes[0].ok and outcomes[0].version == "1.1"
+    r = record(addons)
+    assert r["repo"] == "alice2/demo-renamed" and r["owner_login"] == "alice2"
+    assert registry.build_index(addons, True)["addons"][0]["owner"] == "alice2"
+    gh.publish("alice2/demo-renamed", "v1.2", package(ver="1.2"))
+    gh.issues.clear()
+    outcome = registry.register(gh, addons, gh.url_of(gh.releases["alice2/demo-renamed"][-1]), ALICE, "alice2")
+    assert outcome.ok and outcome.version == "1.2"
+
+
+def test_register_after_rename_and_squatter_on_old_name(gh, addons):
+    register_demo(gh, addons)
+    gh.rename(REPO, "alice/new-name")
+    release = gh.publish("alice/new-name", "v1.1", package(ver="1.1"))
+    outcome = registry.register(gh, addons, gh.url_of(release), ALICE, "alice")
+    assert outcome.ok and outcome.changed and record(addons)["repo"] == "alice/new-name"
+    gh.rename("alice/new-name", "alice2/final", "alice2")
+    gh.add_repo("alice/new-name", BOB, "alice")
+    gh.publish("alice/new-name", "v9", package(ver="9.0"))
+    outcomes = registry.scan(gh, addons)
+    assert not outcomes[0].ok
+    r = record(addons)
+    assert r["current"]["version"] == "1.1" and r["repo"] == "alice/new-name" and r["owner_login"] == "alice"
+    release = gh.publish("alice2/final", "v1.2", package(ver="1.2"))
+    assert not registry.register(gh, addons, gh.url_of(release), ALICE, "alice2").ok
+
+
+def test_api_shape_errors_are_github_errors():
+    for obj in [{"assets": [{"id": "x"}]}, {"assets": "nope"}, "text", None]:
+        with pytest.raises(GitHubError):
+            github._release("a/b", obj)
+    for obj in [{}, {"owner": None}, {"owner": {"id": 1, "login": "a"}}, []]:
+        with pytest.raises(GitHubError):
+            github._repo("a/b", obj)
+
+
+class _Response:
+    def __init__(self, chunks, error=None):
+        self.chunks = list(chunks)
+        self.error = error
+        self.headers = {}
+
+    def read(self, n=-1):
+        if self.chunks:
+            return self.chunks.pop(0)
+        if self.error is not None:
+            raise self.error
+        return b""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _Opener:
+    def __init__(self, result):
+        self.result = result
+
+    def open(self, request, timeout=None):
+        if isinstance(self.result, BaseException):
+            raise self.result
+        return self.result
+
+
+@pytest.mark.parametrize("result", [http.client.BadStatusLine("x"), http.client.LineTooLong("header"), TimeoutError("slow"), _Response([b'{"a"'], http.client.IncompleteRead(b"")), _Response([]), _Response([b"[1]"]), _Response([b"{bad"])])
+def test_real_client_wraps_transport_and_body_errors(result):
+    client = github.GitHub(token="t", repo="erray007/duygor-addons")
+    client._opener = _Opener(result)
+    with pytest.raises(GitHubError):
+        client.get_repo("a/b")
+
+
+@pytest.mark.parametrize("result", [http.client.BadStatusLine("x"), ConnectionResetError("reset"), _Response([b"abc"], http.client.IncompleteRead(b"abc")), _Response([b"abc"], ConnectionResetError("reset"))])
+def test_real_client_download_wraps_transport_errors(result):
+    client = github.GitHub(token="t", repo="erray007/duygor-addons")
+    client._opener = _Opener(result)
+    with pytest.raises(GitHubError):
+        client.download("https://github.com/a/b/releases/download/v1/x.dgp", 10)
+
+
+def test_real_client_open_issue_needs_a_number():
+    client = github.GitHub(token="t", repo="erray007/duygor-addons")
+    client._opener = _Opener(_Response([b'{"number": "x"}']))
+    with pytest.raises(GitHubError):
+        client.open_issue("t", "b")
+    client._opener = _Opener(_Response([b'{"number": 12}']))
+    assert client.open_issue("t", "b") == 12

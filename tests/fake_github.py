@@ -18,6 +18,8 @@ class FakeGitHub:
         self.closed = []
         self.downloads = []
         self.failing = set()
+        self.raising = {}
+        self.renames = {}
         self._next_id = 100
         self._clock = 0
 
@@ -28,6 +30,18 @@ class FakeGitHub:
     def add_repo(self, full_name, owner_id, owner_login=None, owner_type="User"):
         self.repos[full_name] = Repo(owner_id, owner_login or full_name.split("/")[0], owner_type, full_name)
         self.releases.setdefault(full_name, [])
+
+    def rename(self, old, new, owner_login=None):
+        """Like GitHub: the old name keeps redirecting to the renamed repository."""
+        repo = self.repos.pop(old)
+        self.repos[new] = Repo(repo.owner_id, owner_login or new.split("/")[0], repo.owner_type, new)
+        self.releases[new] = self.releases.pop(old)
+        self.renames[old] = new
+
+    def _resolve(self, repo):
+        while repo in self.renames and repo not in self.repos:
+            repo = self.renames[repo]
+        return repo
 
     def make_asset(self, repo, tag, name, data):
         self._next_id += 1
@@ -59,30 +73,33 @@ class FakeGitHub:
     def _check(self, repo):
         if repo in self.failing:
             raise GitHubError(503, "unavailable")
+        if repo in self.raising:
+            raise self.raising[repo]
+        return self._resolve(repo)
 
     def get_release_by_url(self, url):
         repo, tag = parse_release_url(url)
-        self._check(repo)
+        repo = self._check(repo)
         for release in self.releases.get(repo, []):
             if release.tag == tag:
                 return release
         raise GitHubError(404, "not found")
 
     def latest_release(self, repo):
-        self._check(repo)
+        repo = self._check(repo)
         for release in reversed(self.releases.get(repo, [])):
             if not release.draft and not release.prerelease:
                 return release
         return None
 
     def get_repo(self, repo):
-        self._check(repo)
+        repo = self._check(repo)
         if repo not in self.repos:
             raise GitHubError(404, "not found")
         return self.repos[repo]
 
     def get_asset(self, repo, asset_id):
-        self._check(repo)
+        repo = self._check(repo)
         for release in self.releases.get(repo, []):
             for a in release.assets:
                 if a.id == asset_id:
