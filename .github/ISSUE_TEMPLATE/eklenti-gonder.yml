@@ -6,9 +6,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Eklentinin GitHub Release sayfasının adresini yazın. Kayıt otomatik yapılır ve sonuç bu issue'ya yorum olarak yazılır.
+        Eklentinin GitHub Release sayfasının adresini yazın. Kayıt otomatik denetlenir ve sonuç bu issue'ya yorum olarak yazılır. İlk gönderiminiz depo yöneticisinin onayını bekler (issue açık kalır, `onay-bekliyor` etiketi alır); onaydan sonra yeni sürümleriniz ve yeni eklentileriniz otomatik yayına girer.
 
-        Enter the address of your add-on's GitHub Release page. Registration is automatic and the result is posted as a comment on this issue.
+        Enter the address of your add-on's GitHub Release page. The submission is checked automatically and the result is posted as a comment on this issue. Your first submission waits for approval by the registry maintainer (the issue stays open, labelled `onay-bekliyor`); after that, your new releases and new add-ons publish automatically.
   - type: input
     id: release_url
     attributes:

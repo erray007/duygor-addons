@@ -19,8 +19,46 @@ rules, so the two must stay identical.
   - `register --issue-json <path>` / `remove --issue-json <path>`: the file holds
     `{"issue_number", "author_id", "author_login", "body"}`; prints
     `{ok, message_tr, message_en, changed, comment}`.
+    `pending` is true when the submission was reserved and awaits approval (see below).
+  - `approve --issue-json <path> --sender-id <id>` / `reject ...`: a maintainer's decision on a
+    submit issue; prints the same fields plus `authorized` (false, with nothing changed, when the
+    sender is not in `config.json` → `maintainers`).
   - `scan`: prints the issues to open as `[{title, body}]`.
   - `build-index --out site/index.json`: `storeEnabled` comes from `config.json`.
+- `duygor_registry.trust`: maintainers (`config.json` → `"maintainers"`, numeric GitHub user ids)
+  and approved authors (`trusted_authors.json`, a list of `{id, login, approved_at}` sorted by id).
+  A malformed file stops the CLI (exit 2) instead of trusting or distrusting anyone.
+
+## First-submission approval
+
+Approval is per author (numeric GitHub user id), not per add-on. Maintainers are always trusted.
+
+- A submit form from an author who is neither a maintainer nor in `trusted_authors.json` runs every
+  check; on success the record is saved with `"status": "pending"`, which reserves the id for that
+  author and repository but never publishes it. The issue gets a bilingual "awaiting approval"
+  comment, the label `onay-bekliyor`, and stays open. Submitting again while pending gives the same
+  answer and takes the newer package. A remove form withdraws a pending submission and frees the id.
+- Pending records are never scanned, never hidden by the integrity check and never in index.json.
+  Records without `status` (all records registered before this feature) are published.
+- **Approve:** a maintainer adds the label `onaylandi`. The Review workflow (`issues: labeled`)
+  passes the event's `sender.id` to `cli approve`; the author joins `trusted_authors.json` and the
+  pending add-on is published from its repository's latest release, checked again now. The issue is
+  closed and `onay-bekliyor` removed. If that release fails the checks, the author stays approved,
+  the record stays pending and the author's next form publishes it. With nothing pending, the form
+  itself is handled as a trusted submission.
+- **Reject:** a maintainer adds `reddedildi`; the pending record is deleted (the id is free for
+  anyone) and the issue closed. A published record is never touched.
+- A decision label from anyone else is removed again, with one comment per issue saying that only
+  maintainers can decide. Labels added by bots are ignored.
+- From then on the author's new releases (hourly scan) and new add-ons (submit form) publish
+  automatically.
+- The sweep never resubmits an `onay-bekliyor` issue. An open submit issue that carries a decision
+  label (its Review run was lost) is handled by the sweep with the account that last added that
+  label, read from the issue's events, and the same maintainer check. If a decision still seems
+  stuck, removing and re-adding the label starts a new Review run.
+
+Labels the repository needs: `eklenti-gonder`, `eklenti-kaldir` (forms), `onay-bekliyor`,
+`onaylandi`, `reddedildi` (approval).
 
 Store limits on top of the install rules (`registry._inspect`): name at most 100 characters in
 every language, author at most 100, description at most 2000, at most 64 language files; such
@@ -54,6 +92,9 @@ app sees the change on its next store refresh.
   `config.json` that cannot be read or parsed, or whose `storeEnabled` is not `true`/`false`,
   closes the store (fail closed) with an `ERROR`/`::error` line in the log; a missing file means
   open. Set it back to `true` the same way to turn the store on again.
+- Withdraw an author's approval: delete their entry from `trusted_authors.json`, push. Their new
+  add-ons then wait for approval again; already published add-ons stay and keep receiving updates,
+  so take them off as below if needed.
 - Take one add-on off the store: set `"removed": true` in `addons/<id>.json` (the id stays
   reserved for its owner, who can republish it with the submit form), or delete
   `addons/<id>.json` to free the id entirely; push, run Scan.

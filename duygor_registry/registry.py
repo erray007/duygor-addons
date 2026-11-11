@@ -36,6 +36,10 @@ MAX_CHANGELOG = 10000
 MAX_ENTRY_BYTES = 64 * 1024
 MAX_INDEX_BYTES = 2 * 1024 * 1024
 RECORD_EXTENSION = ".json"
+# A record without "status" is published; "pending" holds an unapproved author's first submission:
+# validated and its id reserved, but never scanned, hidden or put in the index until a maintainer approves.
+STATUS_PENDING = "pending"
+STATUS_PUBLISHED = "published"
 # Longest GitHub login (39) and owner/repo name (39 + 1 + 100): the budget check holds after any rename.
 _PLACEHOLDER_OWNER = "x" * 39
 _PLACEHOLDER_REPO = "x" * 140
@@ -63,6 +67,7 @@ class Outcome:
     message_en: str
     notify_login: str | None = None
     changed: bool = False
+    pending: bool = False
 
 
 @dataclass
@@ -145,6 +150,19 @@ def records(addons_dir, skip_corrupt=False):
         sys.stderr.write("skipped %s: corrupt registry record (%s)\n" % (name, problem))
 
 
+def is_published(record):
+    """Only a missing or "published" status is published; anything else (pending or unknown) stays out of the store."""
+    return record.get("status", STATUS_PUBLISHED) == STATUS_PUBLISHED
+
+
+def _delete(addons_dir, addon_id):
+    try:
+        os.remove(_record_path(addons_dir, addon_id))
+    except FileNotFoundError:
+        return False
+    return True
+
+
 # Messages
 
 def _safe(text):
@@ -169,6 +187,15 @@ def _register_rejected(tr, en, addon_id=None, ver=None):
 def _published(addon_id, ver, changed):
     label = _label(addon_id, ver)
     return Outcome(True, addon_id, ver, label + " yayında.", label + " is published.", None, changed)
+
+
+def _pending(addon_id, ver, changed):
+    label = _label(addon_id, ver)
+    return Outcome(True, addon_id, ver, label + " denetimden geçti ve kimlik size ayrıldı. İlk gönderiminiz olduğu için yayına girmeden önce depo yöneticisinin onayını bekliyor. Onaylanınca eklenti yayına girer ve bu issue kapanır. Onaydan sonra yeni sürümleriniz ve yeni eklentileriniz otomatik yayına girer.", label + " passed the checks and the id is reserved for you. As this is your first submission, it is awaiting approval by the registry maintainer before it is published. Once approved, the add-on is published and this issue is closed. After that, your new releases and new add-ons publish automatically.", None, changed, True)
+
+
+def _github_down(addon_id=None, ver=None):
+    return _register_rejected("GitHub'a ulaşılamadı. Biraz sonra formu yeniden gönderin.", "GitHub could not be reached. Submit the form again a little later.", addon_id, ver)
 
 
 def _event_outcome(record, event, changed):
@@ -408,7 +435,7 @@ def _scan_one(gh, record):
     return _scan_record(gh, record, gh.latest_release(record["repo"]), repo=repo)
 
 
-def _explicit_outcome(record, events, was_removed, changed):
+def _explicit_outcome(record, events, was_removed, changed, was_pending=False):
     for kind in ("rejected", "hidden", "published"):
         for event in events:
             if event.kind == kind:
@@ -417,8 +444,11 @@ def _explicit_outcome(record, events, was_removed, changed):
     label = _label(record["id"], current["version"])
     if record.get("hidden_reason"):
         return Outcome(False, record["id"], current["version"], label + " şu anda mağazada gizli: yayındaki .dgp dosyası değişti. Daha büyük sürüm numaralı yeni bir Release yayınlayın.", label + " is currently hidden from the store: the published .dgp file changed. Publish a new Release with a higher version.", None, changed)
-    tr = label + (" yeniden yayında." if was_removed else " zaten yayında.")
-    en = label + (" is published again." if was_removed else " is already published.")
+    if was_pending:
+        tr, en = label + " yayında.", label + " is published."
+    else:
+        tr = label + (" yeniden yayında." if was_removed else " zaten yayında.")
+        en = label + (" is published again." if was_removed else " is already published.")
     ignored = next((e for e in events if e.kind == "ignored"), None)
     if ignored is not None and ignored.version and ignored.version != current["version"]:
         tr += " Bu Release'teki %s sürümü daha yeni değil, yok sayıldı." % ignored.version
@@ -428,59 +458,171 @@ def _explicit_outcome(record, events, was_removed, changed):
 
 # Public API
 
-def register(gh, addons_dir, release_url, author_id, author_login):
-    """Handles a submit form: binds a new id to the author and repository, or updates an owned one."""
+def _fetch_release(gh, release_url):
+    """The release a form names: -> (release, None) or (None, rejection Outcome)."""
     try:
         parse_release_url(release_url)
     except ValueError:
-        return _register_rejected("Release adresi geçersiz. Biçim: https://github.com/<sahip>/<repo>/releases/tag/<etiket>", "The release URL is invalid. Format: https://github.com/<owner>/<repo>/releases/tag/<tag>")
+        return None, _register_rejected("Release adresi geçersiz. Biçim: https://github.com/<sahip>/<repo>/releases/tag/<etiket>", "The release URL is invalid. Format: https://github.com/<owner>/<repo>/releases/tag/<tag>")
     try:
         release = gh.get_release_by_url(release_url)
     except GitHubError:
         release = None
     if release is None:
-        return _register_rejected("Release bulunamadı ya da okunamadı. Yayınlanmış ve herkese açık bir repoda olmalı.", "The release was not found or could not be read. It must be published, in a public repository.")
+        return None, _register_rejected("Release bulunamadı ya da okunamadı. Yayınlanmış ve herkese açık bir repoda olmalı.", "The release was not found or could not be read. It must be published, in a public repository.")
+    return release, None
+
+
+def _check_release(gh, release, author_id):
+    """Every check of a submission that does not depend on the registry: -> ((asset, repo, info), None) or (None, rejection)."""
     if release.draft or release.prerelease:
-        return _register_rejected("Release taslak ya da ön sürüm (pre-release). Normal bir Release yayınlayın.", "The release is a draft or a pre-release. Publish a normal release.")
+        return None, _register_rejected("Release taslak ya da ön sürüm (pre-release). Normal bir Release yayınlayın.", "The release is a draft or a pre-release. Publish a normal release.")
     assets = _package_assets(release)
     if len(assets) != 1:
-        return _register_rejected("Release'te tam olarak bir .dgp dosyası olmalı, %d bulundu." % len(assets), "The release must have exactly one .dgp file, found %d." % len(assets))
+        return None, _register_rejected("Release'te tam olarak bir .dgp dosyası olmalı, %d bulundu." % len(assets), "The release must have exactly one .dgp file, found %d." % len(assets))
     asset = assets[0]
     try:
         repo = gh.get_repo(release.repo)
     except GitHubError:
-        return _register_rejected("`%s` reposu okunamadı. Biraz sonra formu yeniden gönderin." % release.repo, "The repository `%s` could not be read. Submit the form again a little later." % release.repo)
+        return None, _register_rejected("`%s` reposu okunamadı. Biraz sonra formu yeniden gönderin." % release.repo, "The repository `%s` could not be read. Submit the form again a little later." % release.repo)
     if repo.owner_type != "User":
-        return _register_rejected("organizasyon repoları bu sürümde desteklenmiyor. Eklentiyi kendi kullanıcı hesabınızdaki bir repodan yayınlayın.", "organization repositories are not supported yet. Publish the add-on from a repository owned by your user account.")
+        return None, _register_rejected("organizasyon repoları bu sürümde desteklenmiyor. Eklentiyi kendi kullanıcı hesabınızdaki bir repodan yayınlayın.", "organization repositories are not supported yet. Publish the add-on from a repository owned by your user account.")
     if repo.owner_id != author_id:
-        return _register_rejected("formu gönderen hesap `%s` reposunun sahibi değil." % release.repo, "the account that submitted the form does not own the repository `%s`." % release.repo)
+        return None, _register_rejected("formu gönderen hesap `%s` reposunun sahibi değil." % release.repo, "the account that submitted the form does not own the repository `%s`." % release.repo)
     try:
         info = _inspect(_fetch(gh, asset), release, asset)
     except PackageError as e:
-        return _register_rejected("paket geçersiz: " + _safe(e.message_tr), "the package is invalid: " + _safe(e.message_en))
+        return None, _register_rejected("paket geçersiz: " + _safe(e.message_tr), "the package is invalid: " + _safe(e.message_en))
     except GitHubError:
-        return _register_rejected("Release dosyası indirilemedi. Biraz sonra formu yeniden gönderin.", "The release file could not be downloaded. Submit the form again a little later.")
+        return None, _register_rejected("Release dosyası indirilemedi. Biraz sonra formu yeniden gönderin.", "The release file could not be downloaded. Submit the form again a little later.")
+    return (asset, repo, info), None
+
+
+def _submission(gh, release_url, author_id):
+    """The fully checked release of a form: -> ((release, asset, repo, info), None) or (None, rejection)."""
+    release, outcome = _fetch_release(gh, release_url)
+    if outcome is not None:
+        return None, outcome
+    checked, outcome = _check_release(gh, release, author_id)
+    if outcome is not None:
+        return None, outcome
+    return (release,) + checked, None
+
+
+def _refresh_pending(record, release, asset, repo, info):
+    """Nothing of a pending record is public yet, so it simply takes the checked package unless that is older."""
+    _refresh_names(record, repo)
+    record["removed"] = False
+    if not version.is_newer((record.get("current") or {}).get("version"), info.version):
+        record["current"] = _current(info, asset, release)
+        record["hidden_reason"] = None
+        record["reported_asset_change"] = None
+        record["checked_asset"] = None
+        record["rejected_versions"] = []
+
+
+def _register_checked(gh, addons_dir, release, asset, repo, info, author_id, trusted, expected_id=None):
+    if expected_id is not None and info.id != expected_id:
+        return _register_rejected("en son Release'teki paketin kimliği `%s`, onay bekleyen kimlik `%s`." % (info.id, expected_id), "the package in the latest release has the id `%s`, not the pending id `%s`." % (info.id, expected_id), expected_id, info.version)
     full_name = repo.full_name or release.repo
     record = load(addons_dir, info.id)
     if record is None:
         record = _new_record(info, asset, release, repo, full_name)
-        return _published(info.id, info.version, save(addons_dir, record))
+        if trusted:
+            return _published(info.id, info.version, save(addons_dir, record))
+        record["status"] = STATUS_PENDING
+        return _pending(info.id, info.version, save(addons_dir, record))
     if record["owner_id"] != author_id:
         return _register_rejected("bu kimlik başka bir hesaba ait.", "this id belongs to another account.", info.id, info.version)
     try:
         same = _same_repo(gh, record, repo, full_name)
     except GitHubError:
-        return _register_rejected("GitHub'a ulaşılamadı. Biraz sonra formu yeniden gönderin.", "GitHub could not be reached. Submit the form again a little later.", info.id, info.version)
+        return _github_down(info.id, info.version)
     if not same:
         return _register_rejected("bu kimlik `%s` reposuna bağlı, başka bir repodan yayınlanamaz." % record["repo"], "this id is bound to the repository `%s` and cannot be published from another one." % record["repo"], info.id, info.version)
+    was_pending = not is_published(record)
+    if was_pending:
+        _refresh_pending(record, release, asset, repo, info)
+        if not trusted:
+            return _pending(record["id"], record["current"]["version"], save(addons_dir, record))
+        del record["status"]
     was_removed = bool(record.get("removed"))
     record["removed"] = False
     _refresh_names(record, repo)
     try:
         events = _scan_record(gh, record, release, True, info, repo)
     except GitHubError:
-        return _register_rejected("GitHub'a ulaşılamadı. Biraz sonra formu yeniden gönderin.", "GitHub could not be reached. Submit the form again a little later.", info.id, info.version)
-    return _explicit_outcome(record, events, was_removed, save(addons_dir, record))
+        return _github_down(info.id, info.version)
+    return _explicit_outcome(record, events, was_removed, save(addons_dir, record), was_pending)
+
+
+def register(gh, addons_dir, release_url, author_id, author_login, trusted=True):
+    """Handles a submit form: binds a new id to the author and repository, or updates an owned one.
+
+    For an author who is not trusted (no maintainer approved them yet) a new id is only reserved:
+    the record is saved with status pending and stays out of the store until approve().
+    """
+    checked, outcome = _submission(gh, release_url, author_id)
+    if outcome is not None:
+        return outcome
+    return _register_checked(gh, addons_dir, *checked, author_id, trusted)
+
+
+def _pending_target(gh, addons_dir, release_url, author_id):
+    """The pending record of the author a maintainer's decision applies to: -> (record or None, None) or (None, rejection).
+
+    With one pending record it is the target whatever the form says; with several, the form's release tells which.
+    """
+    pending = [r for r in records(addons_dir, skip_corrupt=True) if not is_published(r) and r.get("owner_id") == author_id]
+    if len(pending) <= 1:
+        return (pending[0] if pending else None), None
+    checked, outcome = _submission(gh, release_url, author_id)
+    if outcome is not None:
+        return None, outcome
+    return next((r for r in pending if r["id"] == checked[3].id), None), None
+
+
+def _publish_pending(gh, addons_dir, record):
+    """Publishes a pending record from its repository's latest release, checked again now."""
+    try:
+        release = gh.latest_release(record["repo"])
+    except GitHubError:
+        return _github_down(record["id"])
+    if release is None:
+        return _register_rejected("`%s` reposunda yayınlanmış bir Release yok." % record["repo"], "the repository `%s` has no published release." % record["repo"], record["id"])
+    checked, outcome = _check_release(gh, release, record["owner_id"])
+    if outcome is not None:
+        return outcome
+    return _register_checked(gh, addons_dir, release, *checked, record["owner_id"], True, record["id"])
+
+
+def approve(gh, addons_dir, release_url, author_id, author_login):
+    """A maintainer approved the form's author, who the caller has already added to the trusted authors.
+
+    Their pending add-on is published from its latest release; with nothing pending the form is handled
+    as a trusted submission. A failed publish leaves the record pending, so the author's next form publishes it.
+    """
+    record, outcome = _pending_target(gh, addons_dir, release_url, author_id)
+    if outcome is None:
+        outcome = register(gh, addons_dir, release_url, author_id, author_login, True) if record is None else _publish_pending(gh, addons_dir, record)
+    tr = "Yazar onaylandı, yeni sürümleri ve yeni eklentileri artık otomatik yayına girer. " + outcome.message_tr
+    en = "The author is approved; their new releases and new add-ons now publish automatically. " + outcome.message_en
+    if not outcome.ok:
+        tr += " Sorunu düzeltip formu yeniden gönderdiğinizde eklenti otomatik yayına girer."
+        en += " Fix the problem and submit the form again; the add-on then publishes automatically."
+    return Outcome(outcome.ok, outcome.addon_id, outcome.version, tr, en, None, outcome.changed)
+
+
+def reject(gh, addons_dir, release_url, author_id):
+    """A maintainer rejected the form's first submission: the pending record is deleted, freeing its id."""
+    record, outcome = _pending_target(gh, addons_dir, release_url, author_id)
+    if outcome is not None:
+        return outcome
+    if record is None:
+        return Outcome(True, None, None, "Onay bekleyen bir gönderim bulunamadı, hiçbir şey değişmedi.", "No submission awaiting approval was found; nothing was changed.")
+    ver = (record.get("current") or {}).get("version")
+    label = _label(record["id"], ver)
+    return Outcome(True, record["id"], ver, label + " reddedildi: depo yöneticisi ilk gönderimi onaylamadı, eklenti yayına alınmadı. Kimlik serbest bırakıldı.", label + " was rejected: the registry maintainer did not approve the first submission, so the add-on was not published. The id is free again.", None, _delete(addons_dir, record["id"]))
 
 
 def remove(gh, addons_dir, addon_id, author_id):
@@ -494,6 +636,8 @@ def remove(gh, addons_dir, addon_id, author_id):
     ver = (record.get("current") or {}).get("version")
     if record["owner_id"] != author_id:
         return Outcome(False, addon_id, ver, "Kaldırma reddedildi: %s eklentisini yalnız sahibi kaldırabilir." % label, "Removal was rejected: only the owner can remove %s." % label)
+    if not is_published(record):
+        return Outcome(True, addon_id, ver, label + " için onay bekleyen gönderim geri çekildi, kimlik serbest bırakıldı.", "The submission of %s awaiting approval was withdrawn and the id is free again." % label, None, _delete(addons_dir, addon_id))
     if record.get("removed"):
         return Outcome(True, addon_id, ver, label + " zaten kaldırılmış.", label + " is already removed.")
     record["removed"] = True
@@ -508,10 +652,13 @@ def _scan_failed(record, tr, en, error):
 
 
 def scan(gh, addons_dir):
-    """Hourly scan of every published record; issues are opened through gh.open_issue."""
+    """Hourly scan of every published record; issues are opened through gh.open_issue.
+
+    Pending records are skipped entirely: nothing of them is public, and approve() checks them again.
+    """
     outcomes = []
     for record in list(records(addons_dir)):
-        if record.get("removed"):
+        if record.get("removed") or not is_published(record):
             continue
         # One record must never stop the others: a failure leaves it unsaved and the next scan retries it.
         # Issues are opened before the save, so a failed save or issue can repeat an issue but never lose one.
@@ -583,7 +730,7 @@ def _keep_order(item):
 
 
 def build_index(addons_dir, store_enabled):
-    """The index.json document the app reads; removed and hidden add-ons are left out.
+    """The index.json document the app reads; removed, hidden and pending add-ons are left out.
 
     With the store disabled no record is read at all, so the kill switch always deploys. Corrupt record
     files and entries over MAX_ENTRY_BYTES are skipped; when the rest would reach MAX_INDEX_BYTES the most
@@ -593,7 +740,7 @@ def build_index(addons_dir, store_enabled):
     if store_enabled:
         kept = []
         for record in records(addons_dir, skip_corrupt=True):
-            if record.get("removed") or record.get("hidden_reason"):
+            if record.get("removed") or record.get("hidden_reason") or not is_published(record):
                 continue
             entry = _entry(record)
             if entry is None:

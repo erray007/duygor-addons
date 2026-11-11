@@ -20,7 +20,10 @@ def remove_body(addon_id="demo", box="x"):
 
 
 @pytest.fixture
-def env(tmp_path):
+def env(tmp_path, monkeypatch):
+    # The CLI's default config.json and trusted_authors.json resolve here; Alice is a maintainer, so she publishes directly.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"storeEnabled": True, "maintainers": [ALICE]}), encoding="utf-8")
     gh = FakeGitHub()
     gh.add_repo(REPO, ALICE)
     gh.publish(REPO, "v1.0", package())

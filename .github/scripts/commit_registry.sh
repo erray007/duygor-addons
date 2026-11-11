@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Commits registry state (addons/, site/) as github-actions[bot] and pushes it.
+# Commits registry state (addons/, site/, trusted_authors.json) as github-actions[bot] and pushes it.
 # Does nothing when there is no change. Retries once after a rejected pull or push; after a
 # successful rebase the index is rebuilt so site/index.json matches the merged addons/.
 # Appends `changed=true` to $GITHUB_OUTPUT when something was pushed.
 set -euo pipefail
 
-if [ -z "$(git status --porcelain addons site)" ]; then
+if [ -z "$(git status --porcelain addons site trusted_authors.json)" ]; then
 echo "nothing to commit"
 exit 0
 fi
 
 git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-git add addons site
+git add addons site trusted_authors.json
 git commit -m "chore: update registry [skip ci]"
 
 for attempt in 1 2; do

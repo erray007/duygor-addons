@@ -1,7 +1,10 @@
 """Command line entry points the GitHub Actions workflows run.
 
 register/remove: read the issue (JSON file with issue_number, author_id, author_login, body),
-print {ok, message_tr, message_en, changed, comment} for the workflow to post.
+print {ok, message_tr, message_en, changed, pending, comment} for the workflow to post. pending is
+true when an unapproved author's first submission was reserved and now awaits a maintainer.
+approve/reject: a maintainer's decision on such a submit issue; --sender-id is who added the label,
+and anyone not in config.json maintainers gets {authorized: false} with nothing changed.
 scan: print the issues to open as a JSON list of {title, body}; nothing is opened here.
 build-index: write the index.json the app downloads.
 Handled outcomes always exit with 0; only broken input or state exits non-zero.
@@ -13,7 +16,7 @@ import os
 import re
 import sys
 
-from . import registry
+from . import registry, trust
 from .registry import Outcome
 
 # Field labels of the issue forms (.github/ISSUE_TEMPLATE); the forms must use exactly these.
@@ -101,8 +104,26 @@ def _print(value):
     sys.stdout.write(json.dumps(value, sort_keys=True) + "\n")
 
 
-def _print_outcome(outcome):
-    _print({"ok": outcome.ok, "message_tr": outcome.message_tr, "message_en": outcome.message_en, "changed": outcome.changed, "comment": outcome.message_tr + "\n\n" + outcome.message_en})
+def _print_outcome(outcome, **extra):
+    _print({"ok": outcome.ok, "message_tr": outcome.message_tr, "message_en": outcome.message_en, "changed": outcome.changed, "pending": outcome.pending, "comment": outcome.message_tr + "\n\n" + outcome.message_en, **extra})
+
+
+def _unauthorized(command):
+    verb_tr, verb_en = ("onaylayabilir", "approve") if command == "approve" else ("reddedebilir", "reject")
+    return Outcome(False, None, None, "İlk gönderimleri yalnız depo yöneticileri %s. Etiket kaldırıldı." % verb_tr, "Only the registry maintainers can %s first submissions. The label was removed." % verb_en)
+
+
+def _decide(args, gh):
+    """approve/reject: -> (Outcome, authorized). Approval trusts the author before anything else, so even
+    a package that fails now publishes on the author's next form."""
+    if args.sender_id not in trust.maintainers(args.config):
+        return _unauthorized(args.command), False
+    author_id, author_login, body = _read_issue(args.issue_json)
+    url = parse_submit(body)[0]
+    if args.command == "reject":
+        return registry.reject(_client(gh), args.addons, url, author_id), True
+    trust.add(author_id, author_login, args.trusted)
+    return registry.approve(_client(gh), args.addons, url, author_id, author_login), True
 
 
 class IssueRecorder:
@@ -171,10 +192,15 @@ def _write_if_changed(path, text):
 def _parser():
     parser = argparse.ArgumentParser(prog="duygor_registry.cli", description="DuyGör add-on store registry")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("register", "remove"):
+    for name in ("register", "remove", "approve", "reject"):
         p = sub.add_parser(name)
         p.add_argument("--issue-json", required=True)
         p.add_argument("--addons", default="addons")
+        if name != "remove":
+            p.add_argument("--config", default=trust.CONFIG)
+            p.add_argument("--trusted", default=trust.TRUSTED)
+        if name in ("approve", "reject"):
+            p.add_argument("--sender-id", type=int, required=True)
     p = sub.add_parser("scan")
     p.add_argument("--addons", default="addons")
     p = sub.add_parser("build-index")
@@ -191,8 +217,11 @@ def main(argv=None, gh=None):
             author_id, author_login, body = _read_issue(args.issue_json)
             url, outcome = parse_submit(body)
             if outcome is None:
-                outcome = registry.register(_client(gh), args.addons, url, author_id, author_login)
+                outcome = registry.register(_client(gh), args.addons, url, author_id, author_login, trust.is_trusted(author_id, args.config, args.trusted))
             _print_outcome(outcome)
+        elif args.command in ("approve", "reject"):
+            outcome, authorized = _decide(args, gh)
+            _print_outcome(outcome, authorized=authorized)
         elif args.command == "remove":
             author_id, _, body = _read_issue(args.issue_json)
             addon_id, outcome = parse_remove(body)
