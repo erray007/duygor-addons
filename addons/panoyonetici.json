@@ -1,0 +1,37 @@
+{
+  "checked_asset": null,
+  "current": {
+    "asset_id": 739238034,
+    "asset_updated_at": "2026-11-12T11:32:56Z",
+    "author": "DuyGör kullanıcısı",
+    "changelog": "",
+    "descriptions": {
+      "tr": "Odaktaki öğeyi kopyalar, panoya ek kopyalar, pano geçmişi tutar; seçilen kayıtları ayraç ve sıra seçerek birleştirir, sabitler ya da siler. Sabit notlarda da arama ve toplu işlem vardır. Hiçbir veri dışarı gönderilmez."
+    },
+    "languages": [],
+    "min_version": 534,
+    "names": {
+      "tr": "Gelişmiş Pano"
+    },
+    "published": "2026-11-12T11:37:23Z",
+    "sha256": "82a985616185ffb74fec40763968bf24efb2b23908c11f898c497ab1a55135f7",
+    "size": 13031,
+    "source_language": "tr",
+    "url": "https://github.com/busra-baykal/gelismis-pano/releases/download/v4.8/gelismispano_4.8.dgp",
+    "version": "4.8"
+  },
+  "hidden_reason": null,
+  "id": "panoyonetici",
+  "owner_id": 355664852,
+  "owner_login": "busra-baykal",
+  "pending_issues": [
+    6
+  ],
+  "registered_at": "2026-11-12T11:52:31Z",
+  "rejected_versions": [],
+  "removed": false,
+  "repo": "busra-baykal/gelismis-pano",
+  "reported_asset_change": null,
+  "reported_owner_mismatch": null,
+  "status": "pending"
+}
