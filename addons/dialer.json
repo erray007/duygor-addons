@@ -1,0 +1,38 @@
+{
+  "checked_asset": null,
+  "current": {
+    "asset_id": 744470208,
+    "asset_updated_at": "2026-11-13T17:09:11Z",
+    "author": "NVMA",
+    "changelog": "İlk mağaza sürümü. Yıldız ve kare tuşları artık sesli okunuyor.\n\nFirst store release. The Star and Hash keys now have spoken names.",
+    "descriptions": {
+      "en": "Phone dialer with speed dial and USSD codes (port of Dialer Pro for Jieshuo)",
+      "tr": "Hızlı arama ve USSD kodlarıyla telefon çevirici (Jieshuo için Dialer Pro'nun uyarlaması)"
+    },
+    "languages": [
+      "en",
+      "tr"
+    ],
+    "min_version": 554,
+    "names": {
+      "en": "Dialer",
+      "tr": "Çevirici"
+    },
+    "published": "2026-11-13T17:09:12Z",
+    "sha256": "4218288c61ca9ba5f62da8eb59e3b79da633d7a1d4edfa5aed7c762e29f70b47",
+    "size": 13580,
+    "source_language": "en",
+    "url": "https://github.com/erray007/duygor-addon-dialer/releases/download/v1.1/dialer.dgp",
+    "version": "1.1"
+  },
+  "hidden_reason": null,
+  "id": "dialer",
+  "owner_id": 161474134,
+  "owner_login": "erray007",
+  "registered_at": "2026-11-13T17:09:36Z",
+  "rejected_versions": [],
+  "removed": false,
+  "repo": "erray007/duygor-addon-dialer",
+  "reported_asset_change": null,
+  "reported_owner_mismatch": null
+}
