@@ -1,0 +1,38 @@
+{
+  "checked_asset": null,
+  "current": {
+    "asset_id": 755745890,
+    "asset_updated_at": "2026-11-16T17:24:12Z",
+    "author": "Eray",
+    "changelog": "İlk mağaza sürümü.\n\nFirst store release.",
+    "descriptions": {
+      "en": "Search a text with Google or another search engine.",
+      "tr": "Bir metni Google'da ya da başka bir arama motorunda arar."
+    },
+    "languages": [
+      "en",
+      "tr"
+    ],
+    "min_version": 554,
+    "names": {
+      "en": "Search With",
+      "tr": "İle Ara"
+    },
+    "published": "2026-11-16T17:24:13Z",
+    "sha256": "dbacd261283490734ea766796a3d5e8d801905dfd932b91aa7206fa10b3432dc",
+    "size": 6552,
+    "source_language": "en",
+    "url": "https://github.com/erray007/duygor-addon-searchwith/releases/download/v1.0/searchwith.dgp",
+    "version": "1.0"
+  },
+  "hidden_reason": null,
+  "id": "searchwith",
+  "owner_id": 161474134,
+  "owner_login": "erray007",
+  "registered_at": "2026-11-16T17:24:45Z",
+  "rejected_versions": [],
+  "removed": false,
+  "repo": "erray007/duygor-addon-searchwith",
+  "reported_asset_change": null,
+  "reported_owner_mismatch": null
+}
