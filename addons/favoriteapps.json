@@ -1,0 +1,38 @@
+{
+  "checked_asset": null,
+  "current": {
+    "asset_id": 755746092,
+    "asset_updated_at": "2026-11-16T17:24:16Z",
+    "author": "Eray",
+    "changelog": "İlk mağaza sürümü.\n\nFirst store release.",
+    "descriptions": {
+      "en": "Open your favorite apps from a list with one gesture.",
+      "tr": "Favori uygulamalarını tek hareketle bir listeden aç."
+    },
+    "languages": [
+      "en",
+      "tr"
+    ],
+    "min_version": 554,
+    "names": {
+      "en": "Favorite Apps",
+      "tr": "Favori Uygulamalar"
+    },
+    "published": "2026-11-16T17:24:17Z",
+    "sha256": "93935848285cf0d39a75f7825361bbdc8530c32e91d931cbde57b61ac8e0d2c8",
+    "size": 4209,
+    "source_language": "en",
+    "url": "https://github.com/erray007/duygor-addon-favoriteapps/releases/download/v1.0/favoriteapps.dgp",
+    "version": "1.0"
+  },
+  "hidden_reason": null,
+  "id": "favoriteapps",
+  "owner_id": 161474134,
+  "owner_login": "erray007",
+  "registered_at": "2026-11-16T17:24:56Z",
+  "rejected_versions": [],
+  "removed": false,
+  "repo": "erray007/duygor-addon-favoriteapps",
+  "reported_asset_change": null,
+  "reported_owner_mismatch": null
+}
